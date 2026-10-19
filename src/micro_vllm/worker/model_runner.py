@@ -99,7 +99,7 @@ class ModelRunner:
         self._available_kv_cache_memory_bytes: int | None = None
         self._peak_activation_memory_bytes = 0
         self._sampler = Sampler()
-
+        
     def initialize_model(self) -> None:
         """Construct, place, and retain the execution model exactly once."""
 

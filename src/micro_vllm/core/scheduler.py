@@ -120,7 +120,7 @@ class Scheduler:
                 break
             scheduled_requests.append(scheduled_request)
             remaining_token_budget -= num_scheduled_tokens
-
+            
         while (
             self._waiting
             and not cache_capacity_exhausted

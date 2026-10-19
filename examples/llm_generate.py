@@ -5,6 +5,7 @@ Hugging Face cache.
 """
 
 import torch
+import os
 
 from micro_vllm import (
     CacheConfig,
@@ -16,7 +17,7 @@ from micro_vllm import (
 )
 
 
-MODEL_ID = "Qwen/Qwen3-0.6B"
+MODEL_ID = os.path.expanduser("~/huggingface/Qwen3-0.6B")
 
 
 def main() -> None:
@@ -28,8 +29,10 @@ def main() -> None:
                 dtype=torch.float16,
             ),
             scheduler_config=SchedulerConfig(
-                max_model_len=256,
-                max_num_batched_tokens=64,
+                # max_model_len=256,
+                # max_num_batched_tokens=64,
+                max_model_len=128,             
+                max_num_batched_tokens=32,
                 max_num_seqs=2,
             ),
             cache_config=CacheConfig(
@@ -41,13 +44,18 @@ def main() -> None:
     try:
         outputs = llm.generate(
             [
-                "Paged attention is",
-                "A small language model can",
+                # "Paged attention is",
+                # "A small language model can",
+                "I have a very long story about a dragon.",  # 假设约 10 token
+                "And here is another very long story about a robot.", # 假设约 10 token
             ],
             SamplingParams(
                 max_tokens=16,
-                temperature=0.7,
-                top_p=0.9,
+                # temperature=0.7,
+                # top_p=0.9,
+                # seed=0,
+                temperature=1.0,
+                top_k=1,
                 seed=0,
             ),
         )
