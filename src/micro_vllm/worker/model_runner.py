@@ -82,6 +82,13 @@ class ModelRunner:
         "_kv_cache_topology",
         "_peak_activation_memory_bytes",
         "_sampler",
+        
+        "_input_ids_buffer",
+        "_positions_buffer",
+        "_query_start_buffer",
+        "_context_lengths_buffer",
+        "_slot_mapping_buffer",
+        "_block_table_buffer",
     )
 
     # Model initialization
@@ -99,7 +106,19 @@ class ModelRunner:
         self._available_kv_cache_memory_bytes: int | None = None
         self._peak_activation_memory_bytes = 0
         self._sampler = Sampler()
+
+        # ==================== 新增：Scratch Buffers ====================
+        max_seqs = config.scheduler_config.max_num_seqs
+        max_tokens = config.scheduler_config.max_num_batched_tokens
+        max_blocks_per_seq = (config.scheduler_config.max_model_len + self._block_size - 1) // self._block_size
         
+        self._input_ids_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
+        self._positions_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
+        self._query_start_buffer = torch.empty(max_seqs + 1, dtype=torch.int64, device=self._device)
+        self._context_lengths_buffer = torch.empty(max_seqs, dtype=torch.int64, device=self._device)
+        self._slot_mapping_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
+        self._block_table_buffer = torch.empty((max_seqs, max_blocks_per_seq), dtype=torch.int64, device=self._device)
+        # ================================================================        
     def initialize_model(self) -> None:
         """Construct, place, and retain the execution model exactly once."""
 
@@ -469,6 +488,88 @@ class ModelRunner:
             slot_mappings=slot_mappings,
         )
 
+    # def _flatten_model_input(
+    #     self,
+    #     plan: SchedulerOutput,
+    #     *,
+    #     block_tables: tuple[torch.Tensor, ...],
+    #     slot_mappings: tuple[torch.Tensor, ...],
+    # ) -> ModelInput:
+    #     """Build shared batch tensors and per-layer attention metadata."""
+
+    #     input_ids: list[int] = []
+    #     positions: list[int] = []
+    #     query_start_locations = [0]
+    #     context_lengths: list[int] = []
+    #     request_ids: list[str] = []
+    #     sampling_row_indices: list[int] = []
+
+    #     for request in plan.scheduled_requests:
+    #         input_ids.extend(request.input_token_ids)
+    #         positions.extend(
+    #             range(
+    #                 request.num_computed_tokens,
+    #                 request.num_computed_tokens
+    #                 + request.num_scheduled_tokens,
+    #             )
+    #         )
+    #         query_start_locations.append(len(input_ids))
+    #         context_lengths.append(
+    #             request.num_computed_tokens + request.num_scheduled_tokens
+    #         )
+    #         request_ids.append(request.request_id)
+    #         if request.requires_sampling:
+    #             sampling_row_indices.append(len(input_ids) - 1)
+
+    #     query_positions = torch.tensor(
+    #         positions,
+    #         dtype=torch.int64,
+    #         device=self._device,
+    #     )
+    #     query_start_locations_tensor = torch.tensor(
+    #         query_start_locations,
+    #         dtype=torch.int64,
+    #         device=self._device,
+    #     )
+    #     context_lengths_tensor = torch.tensor(
+    #         context_lengths,
+    #         dtype=torch.int64,
+    #         device=self._device,
+    #     )
+    #     topology = cast(KVCacheTopology, self._kv_cache_topology)
+    #     model = cast(_RunnerModel, self._model)
+    #     group_metadata = tuple(
+    #         model.layer_attentions[group.layer_indices[0]].build_metadata(
+    #             query_positions=query_positions,
+    #             query_start_locations=query_start_locations_tensor,
+    #             context_lengths=context_lengths_tensor,
+    #             block_table=block_tables[group_index],
+    #             slot_mapping=slot_mappings[group_index],
+    #             block_size=self._block_size,
+    #         )
+    #         for group_index, group in enumerate(topology.groups)
+    #     )
+    #     layer_metadata = [group_metadata[0]] * topology.num_layers
+    #     for group_index, group in enumerate(topology.groups):
+    #         for layer_index in group.layer_indices:
+    #             layer_metadata[layer_index] = group_metadata[group_index]
+
+    #     return ModelInput(
+    #         input_ids=torch.tensor(
+    #             input_ids,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         ),
+    #         positions=query_positions,
+    #         layer_attention_metadata=tuple(layer_metadata),
+    #         request_ids=tuple(request_ids),
+    #         sampling_row_indices=torch.tensor(
+    #             sampling_row_indices,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         ),
+    #     )
+
     def _flatten_model_input(
         self,
         plan: SchedulerOutput,
@@ -478,47 +579,42 @@ class ModelRunner:
     ) -> ModelInput:
         """Build shared batch tensors and per-layer attention metadata."""
 
-        input_ids: list[int] = []
-        positions: list[int] = []
+        input_ids_list = []
+        positions_list = []
         query_start_locations = [0]
-        context_lengths: list[int] = []
-        request_ids: list[str] = []
-        sampling_row_indices: list[int] = []
+        context_lengths = []
+        request_ids = []
+        sampling_row_indices = []
 
         for request in plan.scheduled_requests:
-            input_ids.extend(request.input_token_ids)
-            positions.extend(
-                range(
-                    request.num_computed_tokens,
-                    request.num_computed_tokens
-                    + request.num_scheduled_tokens,
-                )
+            input_ids_list.extend(request.input_token_ids)
+            positions_list.extend(
+                range(request.num_computed_tokens, request.num_computed_tokens + request.num_scheduled_tokens)
             )
-            query_start_locations.append(len(input_ids))
-            context_lengths.append(
-                request.num_computed_tokens + request.num_scheduled_tokens
-            )
+            query_start_locations.append(len(input_ids_list))
+            context_lengths.append(request.num_computed_tokens + request.num_scheduled_tokens)
             request_ids.append(request.request_id)
             if request.requires_sampling:
-                sampling_row_indices.append(len(input_ids) - 1)
+                sampling_row_indices.append(len(input_ids_list) - 1)
 
-        query_positions = torch.tensor(
-            positions,
-            dtype=torch.int64,
-            device=self._device,
-        )
-        query_start_locations_tensor = torch.tensor(
-            query_start_locations,
-            dtype=torch.int64,
-            device=self._device,
-        )
-        context_lengths_tensor = torch.tensor(
-            context_lengths,
-            dtype=torch.int64,
-            device=self._device,
-        )
+        total_tokens = len(input_ids_list)
+        
+        # ★ 原地拷贝进预分配 Buffer
+        self._input_ids_buffer[:total_tokens].copy_(torch.tensor(input_ids_list, dtype=torch.int64, device=self._device))
+        self._positions_buffer[:total_tokens].copy_(torch.tensor(positions_list, dtype=torch.int64, device=self._device))
+        
+        q_len = len(query_start_locations)
+        c_len = len(context_lengths)
+        self._query_start_buffer[:q_len].copy_(torch.tensor(query_start_locations, dtype=torch.int64, device=self._device))
+        self._context_lengths_buffer[:c_len].copy_(torch.tensor(context_lengths, dtype=torch.int64, device=self._device))
+
+        query_positions = self._positions_buffer[:total_tokens]
+        query_start_locations_tensor = self._query_start_buffer[:q_len]
+        context_lengths_tensor = self._context_lengths_buffer[:c_len]
+
         topology = cast(KVCacheTopology, self._kv_cache_topology)
         model = cast(_RunnerModel, self._model)
+        
         group_metadata = tuple(
             model.layer_attentions[group.layer_indices[0]].build_metadata(
                 query_positions=query_positions,
@@ -530,26 +626,58 @@ class ModelRunner:
             )
             for group_index, group in enumerate(topology.groups)
         )
+        
         layer_metadata = [group_metadata[0]] * topology.num_layers
         for group_index, group in enumerate(topology.groups):
             for layer_index in group.layer_indices:
                 layer_metadata[layer_index] = group_metadata[group_index]
 
         return ModelInput(
-            input_ids=torch.tensor(
-                input_ids,
-                dtype=torch.int64,
-                device=self._device,
-            ),
+            input_ids=self._input_ids_buffer[:total_tokens],
             positions=query_positions,
             layer_attention_metadata=tuple(layer_metadata),
             request_ids=tuple(request_ids),
-            sampling_row_indices=torch.tensor(
-                sampling_row_indices,
-                dtype=torch.int64,
-                device=self._device,
-            ),
+            # 这里 sampling_row_indices 没有放进 Buffer，先暂时留着
+            sampling_row_indices=torch.tensor(sampling_row_indices, dtype=torch.int64, device=self._device),
         )
+
+    # def _build_slot_mapping(
+    #     self,
+    #     plan: SchedulerOutput,
+    #     cache_group_index: int,
+    # ) -> torch.Tensor:
+    #     """Map scheduled positions to flattened physical cache slots."""
+
+    #     slot_mappings: list[torch.Tensor] = []
+    #     for request in plan.scheduled_requests:
+    #         start_position = request.num_computed_tokens
+    #         end_position = start_position + request.num_scheduled_tokens
+    #         position_tensor = torch.arange(
+    #             start_position,
+    #             end_position,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         )
+    #         block_table = torch.tensor(
+    #             request.block_tables[cache_group_index].block_ids,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         )
+    #         slot_mappings.append(
+    #             map_cache_slots(
+    #                 position_tensor,
+    #                 block_table,
+    #                 self._block_size,
+    #             )
+    #         )
+
+    #     if not slot_mappings:
+    #         return torch.empty(
+    #             0,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         )
+    #     return torch.cat(slot_mappings)
 
     def _build_slot_mapping(
         self,
@@ -557,37 +685,60 @@ class ModelRunner:
         cache_group_index: int,
     ) -> torch.Tensor:
         """Map scheduled positions to flattened physical cache slots."""
+    
+        total_tokens = sum(req.num_scheduled_tokens for req in plan.scheduled_requests)
+        if total_tokens == 0:
+            return self._slot_mapping_buffer[:0]
 
-        slot_mappings: list[torch.Tensor] = []
+        slot_mapping_view = self._slot_mapping_buffer[:total_tokens]
+        offset = 0
+        
         for request in plan.scheduled_requests:
-            start_position = request.num_computed_tokens
-            end_position = start_position + request.num_scheduled_tokens
-            position_tensor = torch.arange(
-                start_position,
-                end_position,
-                dtype=torch.int64,
-                device=self._device,
-            )
-            block_table = torch.tensor(
-                request.block_tables[cache_group_index].block_ids,
-                dtype=torch.int64,
-                device=self._device,
-            )
-            slot_mappings.append(
-                map_cache_slots(
-                    position_tensor,
-                    block_table,
-                    self._block_size,
-                )
-            )
+            start_pos = request.num_computed_tokens
+            end_pos = start_pos + request.num_scheduled_tokens
+            num_tokens = end_pos - start_pos
+            
+            position_tensor = torch.arange(start_pos, end_pos, dtype=torch.int64, device=self._device)
+            block_table = torch.tensor(request.block_tables[cache_group_index].block_ids, dtype=torch.int64, device=self._device)
+            
+            mapped_slots = map_cache_slots(position_tensor, block_table, self._block_size)
+            
+            # ★ 原地拷贝
+            slot_mapping_view[offset : offset + num_tokens].copy_(mapped_slots)
+            offset += num_tokens
+            
+        return slot_mapping_view
 
-        if not slot_mappings:
-            return torch.empty(
-                0,
-                dtype=torch.int64,
-                device=self._device,
-            )
-        return torch.cat(slot_mappings)
+    # def _build_block_table(
+    #     self,
+    #     plan: SchedulerOutput,
+    #     cache_group_index: int,
+    #     *,
+    #     null_block_id: int,
+    # ) -> torch.Tensor:
+    #     """Pad physical block tables to one rectangular int64 tensor."""
+
+    #     max_num_blocks = max(
+    #         (
+    #             len(request.block_tables[cache_group_index].block_ids)
+    #             for request in plan.scheduled_requests
+    #         ),
+    #         default=0,
+    #     )
+    #     block_table = torch.full(
+    #         (len(plan.scheduled_requests), max_num_blocks),
+    #         null_block_id,
+    #         dtype=torch.int64,
+    #         device=self._device,
+    #     )
+    #     for row_index, request in enumerate(plan.scheduled_requests):
+    #         block_ids = request.block_tables[cache_group_index].block_ids
+    #         block_table[row_index, : len(block_ids)] = torch.tensor(
+    #             block_ids,
+    #             dtype=torch.int64,
+    #             device=self._device,
+    #         )
+    #     return block_table
 
     def _build_block_table(
         self,
@@ -597,25 +748,24 @@ class ModelRunner:
         null_block_id: int,
     ) -> torch.Tensor:
         """Pad physical block tables to one rectangular int64 tensor."""
+        
+        batch_size = len(plan.scheduled_requests)
+        if batch_size == 0:
+            return self._block_table_buffer[:0, :0]
 
         max_num_blocks = max(
-            (
-                len(request.block_tables[cache_group_index].block_ids)
-                for request in plan.scheduled_requests
-            ),
-            default=0,
+            len(request.block_tables[cache_group_index].block_ids)
+            for request in plan.scheduled_requests
         )
-        block_table = torch.full(
-            (len(plan.scheduled_requests), max_num_blocks),
-            null_block_id,
-            dtype=torch.int64,
-            device=self._device,
-        )
+        
+        # ★ 取视图并填入 padding
+        block_table_view = self._block_table_buffer[:batch_size, :max_num_blocks]
+        block_table_view.fill_(null_block_id)
+
         for row_index, request in enumerate(plan.scheduled_requests):
             block_ids = request.block_tables[cache_group_index].block_ids
-            block_table[row_index, : len(block_ids)] = torch.tensor(
-                block_ids,
-                dtype=torch.int64,
-                device=self._device,
-            )
-        return block_table
+            if block_ids:
+                block_table_view[row_index, :len(block_ids)].copy_(
+                    torch.tensor(block_ids, dtype=torch.int64, device=self._device)
+                )
+        return block_table_view

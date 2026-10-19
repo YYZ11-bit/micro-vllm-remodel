@@ -1,6 +1,7 @@
 import torch
 from micro_vllm import LLM, LLMConfig, ModelConfig, SchedulerConfig, CacheConfig, SamplingParams
 from torch.profiler import profile, ProfilerActivity
+import time 
 
 def main():
     # 1. 正常初始化配置（尽量简单，跑一次即可）
@@ -33,13 +34,12 @@ def main():
     llm.generate(prompts, params) # 先跑一次预热
 
     print(">>> 开始 Profile...")
-    # 2. 开启 Profiler
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+    start = time.perf_counter()
+    for _ in range(10):
         llm.generate(prompts, params)
+    end = time.perf_counter()
 
-    # 3. 打印结果（按 CUDA 耗时排序，看 GPU 到底在干嘛）
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
-
+    print(f"优化后：平均单次生成耗时 {((end - start) / 10) * 1000:.2f} ms")
     llm.shutdown()
 
 if __name__ == "__main__":
