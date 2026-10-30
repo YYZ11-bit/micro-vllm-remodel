@@ -87,8 +87,8 @@ class ModelRunner:
         "_positions_buffer",
         "_query_start_buffer",
         "_context_lengths_buffer",
-        "_slot_mapping_buffer",
-        "_block_table_buffer",
+        "_slot_mapping_buffers",
+        "_block_table_buffers",
     )
 
     # Model initialization
@@ -110,14 +110,13 @@ class ModelRunner:
         # ==================== 新增：Scratch Buffers ====================
         max_seqs = config.scheduler_config.max_num_seqs
         max_tokens = config.scheduler_config.max_num_batched_tokens
-        max_blocks_per_seq = (config.scheduler_config.max_model_len + self._block_size - 1) // self._block_size
         
         self._input_ids_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
         self._positions_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
         self._query_start_buffer = torch.empty(max_seqs + 1, dtype=torch.int64, device=self._device)
         self._context_lengths_buffer = torch.empty(max_seqs, dtype=torch.int64, device=self._device)
-        self._slot_mapping_buffer = torch.empty(max_tokens, dtype=torch.int64, device=self._device)
-        self._block_table_buffer = torch.empty((max_seqs, max_blocks_per_seq), dtype=torch.int64, device=self._device)
+        self._slot_mapping_buffers: list[torch.Tensor] = []
+        self._block_table_buffers: list[torch.Tensor] = []
         # ================================================================        
     def initialize_model(self) -> None:
         """Construct, place, and retain the execution model exactly once."""
@@ -139,6 +138,7 @@ class ModelRunner:
             tuple(attention.spec for attention in runner_model.layer_attentions)
         )
         self._model = runner_model
+        self._allocate_scratch_buffers()
 
     # KV cache initialization
 
@@ -570,6 +570,13 @@ class ModelRunner:
     #         ),
     #     )
 
+    def _reserve_1d(self, buffer: torch.Tensor, size: int) -> torch.Tensor:
+        """Return ``buffer`` if it fits ``size`` tokens, otherwise grow once."""
+
+        if size <= buffer.numel():
+            return buffer
+        return torch.empty(size, dtype=torch.int64, device=self._device)
+
     def _flatten_model_input(
         self,
         plan: SchedulerOutput,
@@ -598,13 +605,17 @@ class ModelRunner:
                 sampling_row_indices.append(len(input_ids_list) - 1)
 
         total_tokens = len(input_ids_list)
-        
-        # ★ 原地拷贝进预分配 Buffer
-        self._input_ids_buffer[:total_tokens].copy_(torch.tensor(input_ids_list, dtype=torch.int64, device=self._device))
-        self._positions_buffer[:total_tokens].copy_(torch.tensor(positions_list, dtype=torch.int64, device=self._device))
-        
         q_len = len(query_start_locations)
         c_len = len(context_lengths)
+
+        # 原地拷贝进预分配 Buffer；直接执行超过配置预算的 plan 时按需扩容一次
+        self._input_ids_buffer = self._reserve_1d(self._input_ids_buffer, total_tokens)
+        self._positions_buffer = self._reserve_1d(self._positions_buffer, total_tokens)
+        self._query_start_buffer = self._reserve_1d(self._query_start_buffer, q_len)
+        self._context_lengths_buffer = self._reserve_1d(self._context_lengths_buffer, c_len)
+
+        self._input_ids_buffer[:total_tokens].copy_(torch.tensor(input_ids_list, dtype=torch.int64, device=self._device))
+        self._positions_buffer[:total_tokens].copy_(torch.tensor(positions_list, dtype=torch.int64, device=self._device))
         self._query_start_buffer[:q_len].copy_(torch.tensor(query_start_locations, dtype=torch.int64, device=self._device))
         self._context_lengths_buffer[:c_len].copy_(torch.tensor(context_lengths, dtype=torch.int64, device=self._device))
 
@@ -641,44 +652,6 @@ class ModelRunner:
             sampling_row_indices=torch.tensor(sampling_row_indices, dtype=torch.int64, device=self._device),
         )
 
-    # def _build_slot_mapping(
-    #     self,
-    #     plan: SchedulerOutput,
-    #     cache_group_index: int,
-    # ) -> torch.Tensor:
-    #     """Map scheduled positions to flattened physical cache slots."""
-
-    #     slot_mappings: list[torch.Tensor] = []
-    #     for request in plan.scheduled_requests:
-    #         start_position = request.num_computed_tokens
-    #         end_position = start_position + request.num_scheduled_tokens
-    #         position_tensor = torch.arange(
-    #             start_position,
-    #             end_position,
-    #             dtype=torch.int64,
-    #             device=self._device,
-    #         )
-    #         block_table = torch.tensor(
-    #             request.block_tables[cache_group_index].block_ids,
-    #             dtype=torch.int64,
-    #             device=self._device,
-    #         )
-    #         slot_mappings.append(
-    #             map_cache_slots(
-    #                 position_tensor,
-    #                 block_table,
-    #                 self._block_size,
-    #             )
-    #         )
-
-    #     if not slot_mappings:
-    #         return torch.empty(
-    #             0,
-    #             dtype=torch.int64,
-    #             device=self._device,
-    #         )
-    #     return torch.cat(slot_mappings)
-
     def _build_slot_mapping(
         self,
         plan: SchedulerOutput,
@@ -687,10 +660,18 @@ class ModelRunner:
         """Map scheduled positions to flattened physical cache slots."""
     
         total_tokens = sum(req.num_scheduled_tokens for req in plan.scheduled_requests)
+        buffer = self._slot_mapping_buffers[cache_group_index]
         if total_tokens == 0:
-            return self._slot_mapping_buffer[:0]
+            return buffer[:0]
+        if total_tokens > buffer.numel():
+            buffer = torch.empty(
+                total_tokens,
+                dtype=torch.int64,
+                device=self._device,
+            )
+            self._slot_mapping_buffers[cache_group_index] = buffer
 
-        slot_mapping_view = self._slot_mapping_buffer[:total_tokens]
+        slot_mapping_view = buffer[:total_tokens]
         offset = 0
         
         for request in plan.scheduled_requests:
@@ -709,37 +690,6 @@ class ModelRunner:
             
         return slot_mapping_view
 
-    # def _build_block_table(
-    #     self,
-    #     plan: SchedulerOutput,
-    #     cache_group_index: int,
-    #     *,
-    #     null_block_id: int,
-    # ) -> torch.Tensor:
-    #     """Pad physical block tables to one rectangular int64 tensor."""
-
-    #     max_num_blocks = max(
-    #         (
-    #             len(request.block_tables[cache_group_index].block_ids)
-    #             for request in plan.scheduled_requests
-    #         ),
-    #         default=0,
-    #     )
-    #     block_table = torch.full(
-    #         (len(plan.scheduled_requests), max_num_blocks),
-    #         null_block_id,
-    #         dtype=torch.int64,
-    #         device=self._device,
-    #     )
-    #     for row_index, request in enumerate(plan.scheduled_requests):
-    #         block_ids = request.block_tables[cache_group_index].block_ids
-    #         block_table[row_index, : len(block_ids)] = torch.tensor(
-    #             block_ids,
-    #             dtype=torch.int64,
-    #             device=self._device,
-    #         )
-    #     return block_table
-
     def _build_block_table(
         self,
         plan: SchedulerOutput,
@@ -750,16 +700,27 @@ class ModelRunner:
         """Pad physical block tables to one rectangular int64 tensor."""
         
         batch_size = len(plan.scheduled_requests)
+        buffer = self._block_table_buffers[cache_group_index]
         if batch_size == 0:
-            return self._block_table_buffer[:0, :0]
+            return buffer[:0, :0]
 
         max_num_blocks = max(
             len(request.block_tables[cache_group_index].block_ids)
             for request in plan.scheduled_requests
         )
-        
-        # ★ 取视图并填入 padding
-        block_table_view = self._block_table_buffer[:batch_size, :max_num_blocks]
+        if batch_size > buffer.shape[0] or max_num_blocks > buffer.shape[1]:
+            buffer = torch.empty(
+                (
+                    max(batch_size, buffer.shape[0]),
+                    max(max_num_blocks, buffer.shape[1]),
+                ),
+                dtype=torch.int64,
+                device=self._device,
+            )
+            self._block_table_buffers[cache_group_index] = buffer
+
+        # Slice first so padding only touches this plan's rows.
+        block_table_view = buffer[:batch_size, :max_num_blocks]
         block_table_view.fill_(null_block_id)
 
         for row_index, request in enumerate(plan.scheduled_requests):
@@ -769,3 +730,27 @@ class ModelRunner:
                     torch.tensor(block_ids, dtype=torch.int64, device=self._device)
                 )
         return block_table_view
+
+    def _allocate_scratch_buffers(self) -> None:
+        """One block-table and slot-mapping scratch buffer per cache group."""
+        topology = cast(KVCacheTopology, self._kv_cache_topology)
+        scheduler_config = self._config.scheduler_config
+        max_tokens = scheduler_config.max_num_batched_tokens
+        max_seqs = scheduler_config.max_num_seqs
+        max_blocks_per_seq = (
+            scheduler_config.max_model_len + self._block_size - 1
+        ) // self._block_size
+        num_groups = len(topology.groups)
+
+        self._slot_mapping_buffers = [
+            torch.empty(max_tokens, dtype=torch.int64, device=self._device)
+            for _ in range(num_groups)
+        ]
+        self._block_table_buffers = [
+            torch.empty(
+                (max_seqs, max_blocks_per_seq),
+                dtype=torch.int64,
+                device=self._device,
+            )
+            for _ in range(num_groups)
+        ]

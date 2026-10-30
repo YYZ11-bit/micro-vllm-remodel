@@ -14,6 +14,8 @@ from transformers import (
     MistralForCausalLM,
     Qwen3Config,
     Qwen3ForCausalLM,
+    Qwen2Config,
+    Qwen2ForCausalLM,
 )
 
 
@@ -21,7 +23,7 @@ _MODEL_TEST_ENV = "MICRO_VLLM_TEST_MODEL"
 _TINY_LLAMA_SEED = 0
 _TINY_QWEN3_SEED = 1
 _TINY_MISTRAL_SEED = 2
-
+_TINY_QWEN2_SEED = 3
 
 @pytest.fixture
 def tiny_hf_llama_checkpoint(
@@ -86,6 +88,36 @@ def tiny_hf_qwen3_checkpoint(
     )
     return reference_model, checkpoint_path
 
+@pytest.fixture
+def tiny_hf_qwen2_checkpoint(
+    tmp_path: Path,
+) -> tuple[Qwen2ForCausalLM, Path]:
+    """Create one deterministic, single-file HF Qwen2 checkpoint."""
+    checkpoint_path = tmp_path / "tiny-qwen2"
+    config = Qwen2Config(
+        architectures=["Qwen2ForCausalLM"],
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+        rms_norm_eps=1e-5,
+        rope_theta=1_000_000.0,
+        hidden_act="silu",
+        tie_word_embeddings=True,
+        attention_dropout=0.0,
+        use_sliding_window=False,
+    )
+    with torch.random.fork_rng():
+        torch.manual_seed(_TINY_QWEN2_SEED)
+        reference_model = Qwen2ForCausalLM(config).eval()
+    reference_model.save_pretrained(
+        checkpoint_path,
+        safe_serialization=True,
+    )
+    return reference_model, checkpoint_path
 
 @pytest.fixture
 def tiny_hf_mistral_checkpoint(

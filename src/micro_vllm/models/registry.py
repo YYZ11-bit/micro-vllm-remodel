@@ -10,12 +10,13 @@ from micro_vllm.config import ModelConfig
 from micro_vllm.models.llama import LlamaModel
 from micro_vllm.models.mistral import MistralModel
 from micro_vllm.models.qwen import Qwen3Model
-
+from micro_vllm.models.qwen2 import Qwen2Model
 
 _MODEL_CLASSES = MappingProxyType(
     {
         "LlamaForCausalLM": LlamaModel,
         "MistralForCausalLM": MistralModel,
+        "Qwen2ForCausalLM": Qwen2Model,
         "Qwen3ForCausalLM": Qwen3Model,
     }
 )

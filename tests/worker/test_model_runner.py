@@ -49,6 +49,7 @@ def make_input_runner(
     runner._kv_cache_topology = build_kv_cache_topology(
         tuple(attention.spec for attention in layer_attentions)
     )
+    runner._allocate_scratch_buffers()
     return runner
 
 
@@ -74,6 +75,18 @@ def flatten_model_input(
     )
 
 
+def make_builder_runner(
+    block_size: int,
+    device: torch.device,
+) -> ModelRunner:
+    """Runner with one scratch buffer per cache group the builders may index."""
+    attentions = (
+        Attention(FullAttentionSpec(), "reference"),
+        Attention(SlidingWindowSpec(3), "reference"),
+    )
+    return make_input_runner(attentions, block_size, device)
+
+
 def build_slot_mapping(
     plan: SchedulerOutput,
     cache_group_index: int,
@@ -81,9 +94,7 @@ def build_slot_mapping(
     *,
     device: torch.device,
 ) -> torch.Tensor:
-    attention = Attention(FullAttentionSpec(), "reference")
-    return make_input_runner(
-        (attention,),
+    return make_builder_runner(
         block_size,
         device,
     )._build_slot_mapping(plan, cache_group_index)
@@ -96,9 +107,7 @@ def build_block_table(
     null_block_id: int,
     device: torch.device,
 ) -> torch.Tensor:
-    attention = Attention(FullAttentionSpec(), "reference")
-    return make_input_runner(
-        (attention,),
+    return make_builder_runner(
         block_size=4,
         device=device,
     )._build_block_table(
