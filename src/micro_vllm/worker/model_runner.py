@@ -293,7 +293,7 @@ class ModelRunner:
 
         torch.cuda.synchronize(self._device)
         free_memory_bytes, total_memory_bytes = torch.cuda.mem_get_info(
-            self._device
+            self._device.index
         )
         requested_memory_bytes = int(
             total_memory_bytes

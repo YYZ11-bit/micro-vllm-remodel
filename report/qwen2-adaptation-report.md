@@ -6,7 +6,8 @@
   `Qwen2.5-0.5B-Instruct` 为真机目标，完成 **权重加载 → 前向数值对齐 → 引擎端贪心生成**
   的逐级验证
 - 运行环境：Python 3.10 / PyTorch 2.8.0+cu128 / transformers 4.57.6；
-  真机 CPU fp32 跑 0.5B，tiny 模型另在 RTX 3060 Laptop（6 GB）上跑 fp16
+  真机 CPU fp32 跑 0.5B，tiny 模型另在 RTX 3060 Laptop（6 GB）上跑 fp16；
+  1.5B 在 AutoDL（RTX 4080 SUPER 32 GB / torch 2.4.0+cu121 / transformers 4.57.6）上验证
 
 ---
 
@@ -20,8 +21,8 @@
 | 新增源码 | 1 个：`src/micro_vllm/models/qwen2.py` |
 | 修改源码 | 2 个：模型注册表、`model_runner.py`（scratch buffer 修复，与架构无关） |
 | 新增测试 | 6 个文件；修改测试 3 个文件（含 tiny fixture） |
-| 真机验证 | Qwen2.5-0.5B：加载通过、与 HF 的 hidden/logits 最大绝对误差 **0.0**、引擎贪心 token 与 HF 完全一致 |
-| 全量回归 | `554 passed, 10 skipped`（10 个 skip 均为需要 `MICRO_VLLM_TEST_MODEL=1` 的外部模型测试） |
+| 真机验证 | Qwen2.5-0.5B：加载通过、与 HF 的 hidden/logits 最大绝对误差 **0.0**、引擎贪心 token 与 HF 完全一致；Qwen2.5-1.5B：CPU fp32 以及 GPU fp32/bf16 的贪心 token 均与 HF 一致 |
+| 全量回归 | 本机 `554 passed, 10 skipped`；AutoDL（含 GPU 测试）`572 passed, 10 skipped`（skip 均为需要 `MICRO_VLLM_TEST_MODEL=1` 的外部模型测试） |
 
 ---
 
@@ -321,6 +322,28 @@ Python/PyTorch 开销会触发 OOM（曾被内核 kill，退出码 137）。因�
 注意：`del` 必须发生在**测试函数作用域**、且删除的是最后一个引用；
 在 helper 里 `del` 函数参数不会释放任何内存，使用 pytest fixture 持有模型时也无法释放。
 
+### 3.2 AutoDL 上的 Qwen2.5-1.5B 验证
+
+本机内存不足以同时容纳 1.5B 的 fp32 权重，因此在 AutoDL GPU 实例上补做了 1.5B 的
+全链路验证（`transformers 4.57.6`，与 checkpoint 同放在 `/root/autodl-tmp`）：
+
+| 阶段 | 结果 |
+|---|---|
+| 权重加载 `test_qwen2_load_weight` | ✅ 1 passed，12.83 s |
+| CPU fp32 前向对齐 `test_real_qwen2_parity` | ✅ 1 passed，25.86 s；hidden/logits 在 `atol=rtol=1e-5` 下通过 |
+| CPU fp32 引擎贪心 | ✅ 1 passed，46.99 s |
+| **GPU fp32 引擎贪心** | ✅ HF 与 micro-vLLM 均为 `[12095, 13, 576, 6722]`，显存峰值 5.77 GiB |
+| **GPU bf16 引擎贪心** | ✅ 同上，显存峰值 2.89 GiB |
+
+GPU 两项用实例上的临时脚本执行（复用测试文件里的 `make_loaded_engine` /
+`run_to_completion`）：先让 HF 逐 token 贪心 4 步得到参考序列，`del` + `gc.collect()`
+后用同一 prompt 跑 micro-VLLM Engine，比较输出 token 与显存峰值。脚本不在仓库内。
+
+实例的 torch 2.4 / Triton 3.0 还暴露了两处与本适配无关的兼容性问题——
+`torch.cuda.mem_get_info` 需要显式 index、`triton_paged.py` 中 `left: tl.int32 = 0`
+的注解无法被 Triton 3.0 解析。修正后实例上的全量回归为
+`572 passed, 10 skipped`（包含本机无法运行的 GPU 测试）。
+
 ---
 
 ## 4. 已知限制
@@ -329,8 +352,8 @@ Python/PyTorch 开销会触发 OOM（曾被内核 kill，退出码 137）。因�
 |---|---|
 | Sliding Window Attention | 未实现。`use_sliding_window=True` 的 Qwen2 变体（如部分 Qwen1.5 / Qwen2 长上下文配置）会在构造时直接报 `NotImplementedError`，而不是静默算错 |
 | RoPE scaling | 未实现，`rope_scaling` 非空即报错 |
-| Qwen2.5-1.5B | 尚未在本机验证（内存不足），计划在 AutoDL GPU 上补做加载 + parity + 生成 |
-| 真模型精度 | 真模型测试目前只覆盖 CPU fp32；tiny 模型覆盖了 GPU fp16 |
+| 真模型精度 | 1.5B 覆盖 CPU fp32 与 GPU fp32/bf16；GPU 上只比对贪心 token，未做 bf16 下的 logits 容差对齐；tiny 模型覆盖了 GPU fp16 |
+| `LLM.generate()` 端到端 | 真模型路径尚未覆盖 tokenizer 与采样参数（`test_hub_qwen.py` 式的入口） |
 | 引擎测试的 `model` 标记 | 0.5B 贪心测试默认跳过，需要显式设置环境变量才会加载模型 |
 
 ---
@@ -361,8 +384,8 @@ python -m pytest tests/integration/test_real_qwen2.py \
 
 ## 6. 后续工作建议
 
-1. 在 GPU（AutoDL）上完成 Qwen2.5-1.5B 的加载、fp16/bf16 前向对齐与 `LLM.generate()`
-   端到端测试，补齐 `tests/integration/test_hub_qwen.py` 的真模型路径
+1. 补齐 `LLM.generate()` 端到端路径（tokenizer + 采样参数），并考虑 1.5B 在 bf16 下的
+   logits 容差对齐，而不只是贪心 token 比对
 2. 若后续要支持 Qwen2 的 sliding window 或长上下文 `rope_scaling`，应在
    `attention/spec.py` 增加对应的 `AttentionSpec`，而不是在 `Qwen2Model` 里加分支
 3. 将 scratch buffer 的 per-group 不变量写成注释/测试：同一逻辑 block 在不同 cache group

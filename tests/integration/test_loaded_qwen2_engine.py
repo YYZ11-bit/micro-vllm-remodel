@@ -400,7 +400,7 @@ def test_real_qwen2_engine_greedy_matches_hf() -> None:
         token_id = int(logits.argmax())
         expected.append(token_id)
         sequence.append(token_id)
-    del reference                     # 这里才是最后一个引用
+    del reference                     # 最后一个引用
     gc.collect()
 
     harness = make_loaded_engine(model_path, sequence_budget=1)

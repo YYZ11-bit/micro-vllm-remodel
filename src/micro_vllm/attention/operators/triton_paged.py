@@ -74,7 +74,7 @@ def _find_request_for_query_block(
 ):
     """Map one packed query-block program to exactly one request."""
 
-    left: tl.int32 = 0
+    left = 0
     right = num_requests
     while left < right:
         middle = (left + right) // 2
