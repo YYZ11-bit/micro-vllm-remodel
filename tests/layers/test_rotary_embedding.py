@@ -1,10 +1,15 @@
 """Tests for reusable rotary embeddings."""
 
+from collections.abc import Mapping
+
 import pytest
 import torch
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 from micro_vllm.layers.rotary_embedding import RotaryEmbedding
+from transformers import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+from micro_vllm.layers.rotary_embedding import _inverse_frequencies
 
 
 def transformers_rotary_reference(
@@ -77,3 +82,37 @@ def test_rotary_embedding_does_not_modify_value() -> None:
     RotaryEmbedding(head_dim=4)(positions, query, key)
 
     assert torch.equal(value, original_value)
+
+LLAMA32_ROPE_SCALING = {
+    "rope_type": "llama3",
+    "factor": 32.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_max_position_embeddings": 8192,
+}
+
+def test_inverse_frequencies_with_llama3_rope_scaling() -> None:
+    hf_config = LlamaConfig(
+        head_dim=64, hidden_size=2048, num_attention_heads=32,
+        rope_theta=500_000.0, rope_scaling=LLAMA32_ROPE_SCALING,  
+        max_position_embeddings=131072
+    )
+    expected = LlamaRotaryEmbedding(hf_config).inv_freq
+    actual = _inverse_frequencies(
+        head_dim=64,
+        base=500_000.0,
+        rope_scaling=LLAMA32_ROPE_SCALING,
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-8)
+
+    raw = _inverse_frequencies(64, 500_000.0, None)
+    assert torch.equal(actual[:15], raw[:15])                       # 高频不动
+    torch.testing.assert_close(actual[18:], raw[18:] / 32.0)        # 低频 /32
+    assert torch.all(actual[15:18] > raw[15:18] / 32.0)             # 过渡带夹在中间
+    assert torch.all(actual[15:18] < raw[15:18])
+
+    torch.testing.assert_close(
+        _inverse_frequencies(8, 50_000.0, None),
+        _inverse_frequencies(8, 50_000.0, {"rope_type": "default"}),
+        rtol=0.0, atol=0.0,
+    )

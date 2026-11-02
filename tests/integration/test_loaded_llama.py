@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 from safetensors import safe_open
 import torch
-from transformers import LlamaForCausalLM
+from transformers import AutoTokenizer, LlamaForCausalLM
 
 from micro_vllm.attention.attention import AttentionMetadata, map_cache_slots
 from micro_vllm.config import LLMConfig, ModelConfig
 from micro_vllm.model_loader import load_model
 from micro_vllm.models.llama import LlamaModel
-
+from micro_vllm.layers.rotary_embedding import RotaryEmbedding
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 _CPU_ATOL = 1e-5
 _CPU_RTOL = 1e-5
@@ -249,6 +250,72 @@ def test_loaded_checkpoint_hidden_states_and_logits_match_transformers_gpu_fp16(
         atol=_GPU_FP16_ATOL,
         rtol=_GPU_FP16_RTOL,
     )
+
+LLAMA32_ROPE_SCALING = {
+    "rope_type": "llama3",
+    "factor": 32.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_max_position_embeddings": 8192,
+}
+
+def test_loaded_checkpoint_with_llama3_rope_scaling_matches_transformers_cpu(
+        rope_scaling_tiny_hf_llama_checkpoint: tuple[LlamaForCausalLM, Path]
+    ) -> None:
+    reference_model, checkpoint_path = rope_scaling_tiny_hf_llama_checkpoint
+    loaded_model = load_model(
+        LLMConfig(model_config=ModelConfig(model=checkpoint_path))
+    )
+    assert isinstance(loaded_model, LlamaModel)
+
+    hidden_states, logits, reference_hidden_states, reference_logits = (
+        _run_model_pair(
+            loaded_model,
+            reference_model,
+            device="cpu",
+            dtype=torch.float32,
+        )
+    )
+
+    _assert_checkpoint_close(
+        hidden_states,
+        reference_hidden_states,
+        checkpoint_path=checkpoint_path,
+        value_name="final hidden states",
+        atol=_CPU_ATOL,
+        rtol=_CPU_RTOL,
+    )
+    _assert_checkpoint_close(
+        logits,
+        reference_logits,
+        checkpoint_path=checkpoint_path,
+        value_name="logits",
+        atol=_CPU_ATOL,
+        rtol=_CPU_RTOL,
+    )
+
+def test_rope_scaling_changes_position_encoding(
+    rope_scaling_tiny_hf_llama_checkpoint: tuple[LlamaForCausalLM, Path],
+) -> None:
+    _, checkpoint_path = rope_scaling_tiny_hf_llama_checkpoint
+    loaded_model = load_model(
+        LLMConfig(model_config=ModelConfig(model=checkpoint_path))
+    )
+    assert isinstance(loaded_model, LlamaModel)
+
+    scaled = loaded_model.layers[0].self_attn.rotary_embedding
+    num_key_value_heads = loaded_model.layers[0].self_attn.num_key_value_heads
+    head_dim = loaded_model.layers[0].self_attn.head_dim
+    unscaled = RotaryEmbedding(head_dim, base=loaded_model.layers[0].self_attn.rotary_embedding.base)
+
+    positions = torch.tensor([0, 1, 7], dtype=torch.int64)
+    query = torch.randn((3, 4, head_dim))
+    key = torch.randn((3, num_key_value_heads, head_dim))
+
+    scaled_query, _ = scaled(positions, query, key)
+    plain_query, _ = unscaled(positions, query, key)
+
+    assert not torch.allclose(scaled_query, plain_query)
 
 
 def _run_model_pair(

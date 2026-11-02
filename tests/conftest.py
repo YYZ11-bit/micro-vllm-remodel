@@ -54,6 +54,22 @@ def tied_tiny_hf_llama_checkpoint(
         tie_word_embeddings=True,
     )
 
+@pytest.fixture
+def rope_scaling_tiny_hf_llama_checkpoint(
+    tmp_path: Path,
+) -> tuple[LlamaForCausalLM, Path]:
+    """Create one deterministic HF Llama checkpoint with rope_scaling."""
+    return _save_tiny_hf_llama_checkpoint(
+        tmp_path / "rope-scaling-tiny-llama",
+        tie_word_embeddings=True,
+        rope_scaling={"rope_type": "llama3", 
+                      "factor": 8.0,
+                      "low_freq_factor": 1.0,
+                      "high_freq_factor": 4.0,
+                      "original_max_position_embeddings": 16
+                      },
+    )   
+
 
 @pytest.fixture
 def tiny_hf_qwen3_checkpoint(
@@ -170,6 +186,7 @@ def _save_tiny_hf_llama_checkpoint(
     *,
     max_shard_size: str | None = None,
     tie_word_embeddings: bool = False,
+    rope_scaling: dict[str, object] | None = None,
 ) -> tuple[LlamaForCausalLM, Path]:
     config = LlamaConfig(
         architectures=["LlamaForCausalLM"],
@@ -182,6 +199,7 @@ def _save_tiny_hf_llama_checkpoint(
         max_position_embeddings=32,
         rms_norm_eps=1e-5,
         rope_theta=10_000.0,
+        rope_scaling=rope_scaling,
         hidden_act="silu",
         tie_word_embeddings=tie_word_embeddings,
         attention_bias=False,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import torch
 from torch import nn
@@ -27,6 +27,7 @@ class LlamaAttention(nn.Module):
         num_attention_heads: int,
         num_key_value_heads: int,
         rope_theta: float,
+        rope_scaling: Mapping[str, object] | None = None,
         attention: Attention,
     ) -> None:
         super().__init__()
@@ -46,7 +47,7 @@ class LlamaAttention(nn.Module):
             bias=False,
         )
         self.o_proj = Linear(hidden_size, hidden_size, bias=False)
-        self.rotary_embedding = RotaryEmbedding(self.head_dim, base=rope_theta)
+        self.rotary_embedding = RotaryEmbedding(self.head_dim, base=rope_theta, rope_scaling=rope_scaling)
         self.attention = attention
 
     def forward(
@@ -94,6 +95,7 @@ class LlamaDecoderLayer(nn.Module):
         num_key_value_heads: int,
         rope_theta: float,
         rms_norm_eps: float,
+        rope_scaling: Mapping[str, object] | None = None,
         attention: Attention,
     ) -> None:
         super().__init__()
@@ -102,6 +104,7 @@ class LlamaDecoderLayer(nn.Module):
             num_attention_heads=num_attention_heads,
             num_key_value_heads=num_key_value_heads,
             rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
             attention=attention,
         )
         self.mlp = SwiGLUMLP(
@@ -164,6 +167,9 @@ class LlamaModel(nn.Module):
             )
         rms_norm_eps = values.get("rms_norm_eps", 1e-6)
         rope_theta = values.get("rope_theta", 10_000.0)
+        rope_scaling = values.get("rope_scaling")
+        if rope_scaling is not None and not isinstance(rope_scaling, Mapping):
+            raise ValueError("rope_scaling must be a mapping or null")
         self._tie_word_embeddings = values.get("tie_word_embeddings", False)
 
         attention = Attention(FullAttentionSpec(), config.attention_operator)
@@ -178,6 +184,7 @@ class LlamaModel(nn.Module):
                 num_key_value_heads=num_key_value_heads,
                 rope_theta=rope_theta,
                 rms_norm_eps=rms_norm_eps,
+                rope_scaling=rope_scaling,
                 attention=attention,
             )
             for _ in range(num_hidden_layers)

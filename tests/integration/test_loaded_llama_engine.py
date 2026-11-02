@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import gc
 
 import pytest
 import torch
 from transformers import LlamaForCausalLM
+from transformers import AutoTokenizer, LlamaForCausalLM
 
 from micro_vllm.config import CacheConfig, LLMConfig, ModelConfig, SchedulerConfig
 from micro_vllm.core.kv_cache_manager import KVCacheManager
@@ -516,3 +519,33 @@ def test_loaded_finished_and_aborted_requests_release_logical_blocks(
     assert harness.cache_manager.num_free_blocks == 2
     with pytest.raises(KeyError):
         harness.cache_manager.get_block_table("aborted")
+
+@pytest.mark.model
+@torch.no_grad()
+def test_real_llama32_engine_greedy_matches_hf() -> None:
+    path = os.getenv("MICRO_VLLM_LLAMA32_MODEL_PATH")
+    if path is None:
+        pytest.skip("MICRO_VLLM_LLAMA32_MODEL_PATH is not set")
+    model_path = Path(path).expanduser()
+    assert model_path.is_dir()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    prompt = tokenizer("The capital of France is", add_special_tokens=False)["input_ids"]
+
+    reference = LlamaForCausalLM.from_pretrained(
+        model_path, dtype=torch.float32, attn_implementation="eager"
+    ).eval()
+    expected = reference_greedy_tokens(reference, prompt, max_tokens=4)
+    del reference
+    gc.collect()
+
+    harness = make_loaded_engine(
+        model_path,
+        token_budget=16,
+        sequence_budget=1,
+        max_model_len=64,
+    )
+    harness.engine.add_request("request", prompt, SamplingParams(max_tokens=4))
+    run_to_completion(harness)
+
+    assert request_output_tokens(harness, "request") == expected
