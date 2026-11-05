@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from micro_vllm.models.loading import load_checkpoint_tensor
 import torch
 from torch import nn
 
@@ -257,6 +258,8 @@ class Qwen3Model(nn.Module):
                     checkpoint_name,
                     tied_embeddings=self._tie_word_embeddings,
                 )
+                if load_checkpoint_tensor(self, parameter_name, checkpoint_tensor):
+                    continue
                 parameters[parameter_name].copy_(checkpoint_tensor)
 
 

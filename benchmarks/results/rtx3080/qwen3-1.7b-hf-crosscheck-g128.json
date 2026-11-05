@@ -1,0 +1,11 @@
+{
+  "delta": 1.550868034362793,
+  "delta_percent": 10.312671479871959,
+  "dense_perplexity": 15.038470268249512,
+  "group_size": 128,
+  "model": "/root/autodl-tmp/models/Qwen3-1.7B",
+  "ppl_text": "/root/autodl-tmp/w4a16-work/README_EN.md",
+  "ppl_tokens": 1024,
+  "scope": "all",
+  "w4a16_perplexity": 16.589338302612305
+}

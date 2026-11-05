@@ -1,0 +1,11 @@
+{
+  "delta": 5.373159408569336,
+  "delta_percent": 28.621527468744823,
+  "dense_perplexity": 18.77313995361328,
+  "group_size": 128,
+  "model": "/root/autodl-tmp/models/Llama-3.2-1B-Instruct",
+  "ppl_text": "/root/autodl-tmp/w4a16-work/README_EN.md",
+  "ppl_tokens": 1024,
+  "scope": "all",
+  "w4a16_perplexity": 24.146299362182617
+}

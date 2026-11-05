@@ -1,0 +1,10 @@
+{
+  "delta": 5.857028961181641,
+  "delta_percent": 30.605944416598142,
+  "dense_perplexity": 19.136899948120117,
+  "group_size": 32,
+  "model": "/home/lenovo/huggingface/Qwen3-0.6B",
+  "ppl_text": "/home/lenovo/infra/micro-vllm/README_EN.md",
+  "ppl_tokens": 1024,
+  "w4a16_perplexity": 24.993928909301758
+}

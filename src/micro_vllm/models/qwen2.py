@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from micro_vllm.models.loading import load_checkpoint_tensor
 import torch
 from torch import nn
 
@@ -260,6 +261,9 @@ class Qwen2Model(nn.Module):
                     checkpoint_name,
                     tied_embeddings=self._tie_word_embeddings,
                 )
+                if load_checkpoint_tensor(self, parameter_name, checkpoint_tensor):
+                    loaded_name.add(parameter_name)
+                    continue
                 if parameter_name not in parameters:
                     raise KeyError(
                         f"Checkpoint parameter {checkpoint_name} "

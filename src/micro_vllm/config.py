@@ -18,7 +18,32 @@ if TYPE_CHECKING:
 
 _EMPTY_MODEL_METADATA: Mapping[str, object] = MappingProxyType({})
 
+@dataclass(frozen=True, slots=True)
+class QuantizationConfig:
+    method: str = "none"
+    group_size: int = 128
+    kernel: str = "reference" # "reference" | "int4pack" | "auto"
 
+    def __post_init__(self) -> None:
+        if self.method not in {"none", "w4a16"}:
+            raise ValueError(f"unsupported quantization method {self.method!r}")
+        if self.group_size <= 0 or self.group_size % 2 != 0:
+            raise ValueError("group_size must be a positive even integer")
+        if self.kernel not in {"reference", "int4pack", "auto"}:
+            raise ValueError(f"unsupported quantization kernel {self.kernel!r}")
+        if self.method == "none" and self.kernel != "reference":
+            raise ValueError(
+                "kernel must be 'reference' when quantization method is 'none'"
+            )
+        if self.kernel in {"int4pack", "auto"}:
+            if self.method != "w4a16":
+                raise ValueError(f"kernel={self.kernel!r} requires method='w4a16'")
+            if self.group_size not in {32, 64, 128, 256}:
+                raise ValueError(
+                    "group_size must be one of {32, 64, 128, 256} "
+                    f"when using kernel={self.kernel!r}"
+                )
+        
 @dataclass(slots=True)
 class ModelConfig:
     """Model source, construction options, and loaded metadata."""
@@ -34,6 +59,7 @@ class ModelConfig:
     device: torch.device | str = "cuda"
     dtype: torch.dtype = torch.float16
     metadata: Mapping[str, object] | None = None
+    quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
 
     def __post_init__(self) -> None:
         if torch.device(self.device).type not in {"cpu", "cuda"}:

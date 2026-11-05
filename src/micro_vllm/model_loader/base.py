@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import json
 from pathlib import Path
 
+from micro_vllm.layers.quantization.apply import apply_quantization
 import torch
 from torch import nn
 
@@ -39,6 +40,7 @@ class ModelLoader(ABC):
                     f"invalid model config from {source_label}: {error}"
                 ) from error
 
+        apply_quantization(model, model_config.quantization)   # 新增
         try:
             self.load_weights(model, model_path)
         except RuntimeError as error:

@@ -12,7 +12,14 @@ import torch
 from transformers import LlamaForCausalLM
 from transformers import AutoTokenizer, LlamaForCausalLM
 
-from micro_vllm.config import CacheConfig, LLMConfig, ModelConfig, SchedulerConfig
+from micro_vllm.config import (
+    CacheConfig,
+    LLMConfig,
+    ModelConfig,
+    QuantizationConfig,
+    SchedulerConfig,
+)
+from micro_vllm.layers.quantization.w4a16 import W4A16Linear
 from micro_vllm.core.kv_cache_manager import KVCacheManager
 from micro_vllm.core.request import FinishReason
 from micro_vllm.core.scheduler import Scheduler
@@ -61,12 +68,14 @@ def make_loaded_engine(
     enable_prefix_cache: bool = False,
     device: str = "cpu",
     dtype: torch.dtype = torch.float32,
+    quantization: QuantizationConfig = QuantizationConfig(),
 ) -> LoadedEngineHarness:
     config = LLMConfig(
         model_config=ModelConfig(
             model=checkpoint_path,
             device=device,
             dtype=dtype,
+            quantization=quantization,
         ),
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=token_budget,
@@ -164,6 +173,33 @@ def test_loaded_checkpoint_runs_through_model_runner_and_engine(
     )
     assert output.finish_reason is FinishReason.LENGTH
     assert len(harness.executor.plans) == 1
+
+
+def test_w4a16_checkpoint_runs_through_model_runner_and_engine(
+    tiny_hf_llama_checkpoint: tuple[LlamaForCausalLM, Path],
+) -> None:
+    _, checkpoint_path = tiny_hf_llama_checkpoint
+    harness = make_loaded_engine(
+        checkpoint_path,
+        quantization=QuantizationConfig(method="w4a16", group_size=8),
+    )
+    model_runner = harness.worker._model_runner
+    assert model_runner is not None
+    model = model_runner._model
+    assert isinstance(model, LlamaModel)
+    assert type(model.layers[0].self_attn.q_proj) is W4A16Linear
+
+    prompt = [1, 2, 3]
+    harness.engine.add_request(
+        "quantized-request",
+        prompt,
+        SamplingParams(max_tokens=2),
+    )
+    output = run_to_completion(harness)["quantized-request"]
+
+    assert output.output_token_ids
+    assert len(output.output_token_ids) == 2
+    assert output.finish_reason is FinishReason.LENGTH
 
 
 @pytest.mark.gpu
