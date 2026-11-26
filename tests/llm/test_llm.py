@@ -15,7 +15,9 @@ from micro_vllm import (
     SamplingParams,
     SchedulerConfig,
 )
+from micro_vllm.config import SpeculativeConfig
 from micro_vllm.core.request import FinishReason
+from micro_vllm.speculative.ngram import NGramDrafter
 
 
 class FakeTokenizer:
@@ -49,6 +51,7 @@ def make_llm(
     tokenizer: FakeTokenizer,
     *,
     max_model_len: int = 16,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> LLM:
     return LLM(
         LLMConfig(
@@ -66,6 +69,11 @@ def make_llm(
             cache_config=CacheConfig(
                 block_size=2,
                 num_blocks=16,
+            ),
+            speculative_config=(
+                speculative_config
+                if speculative_config is not None
+                else SpeculativeConfig()
             ),
         ),
     )
@@ -204,19 +212,72 @@ def test_shutdown_is_idempotent_and_releases_model_runner(
         llm.generate("prompt", SamplingParams(max_tokens=1))
 
 
-def test_generation_output_owns_token_tuples() -> None:
-    prompt_ids = [1, 2]
-    output_ids = [3, 4]
-    output = GenerationOutput(
-        request_id="request-0",
-        prompt="prompt",
-        prompt_token_ids=prompt_ids,  # type: ignore[arg-type]
-        output_text="output",
-        output_token_ids=output_ids,  # type: ignore[arg-type]
-        finish_reason=FinishReason.LENGTH,
+def test_speculative_config_injects_ngram_drafter(
+    tiny_hf_llama_checkpoint: tuple[torch.nn.Module, Path],
+) -> None:
+    _, checkpoint_path = tiny_hf_llama_checkpoint
+    tokenizer = FakeTokenizer({"prompt": (1,)})
+    disabled = make_llm(checkpoint_path, tokenizer)
+    enabled = make_llm(
+        checkpoint_path,
+        FakeTokenizer({"prompt": (1,)}),
+        speculative_config=SpeculativeConfig(
+            enabled=True,
+            ngram_size=2,
+            max_draft_tokens=3,
+        ),
     )
-    prompt_ids.append(5)
-    output_ids.append(6)
 
-    assert output.prompt_token_ids == (1, 2)
-    assert output.output_token_ids == (3, 4)
+    try:
+        assert disabled._scheduler._drafter is None
+        assert isinstance(enabled._scheduler._drafter, NGramDrafter)
+        assert enabled._scheduler._drafter.ngram_size == 2
+    finally:
+        disabled.shutdown()
+        enabled.shutdown()
+
+
+def test_greedy_speculation_matches_baseline_and_calls_drafter(
+    tiny_hf_llama_checkpoint: tuple[torch.nn.Module, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, checkpoint_path = tiny_hf_llama_checkpoint
+    baseline = make_llm(
+        checkpoint_path,
+        FakeTokenizer({"first": (1, 2, 3)}),
+    )
+    calls: list[tuple[tuple[int, ...], int]] = []
+    original_propose = NGramDrafter.propose
+
+    def counting_propose(
+        self: NGramDrafter,
+        token_ids: tuple[int, ...],
+        max_tokens: int,
+    ):
+        calls.append((tuple(token_ids), max_tokens))
+        return original_propose(self, token_ids, max_tokens)
+
+    monkeypatch.setattr(NGramDrafter, "propose", counting_propose)
+    speculative = make_llm(
+        checkpoint_path,
+        FakeTokenizer({"first": (1, 2, 3)}),
+        speculative_config=SpeculativeConfig(
+            enabled=True,
+            ngram_size=2,
+            max_draft_tokens=3,
+        ),
+    )
+    params = SamplingParams(max_tokens=4)
+
+    try:
+        baseline_output = baseline.generate("first", params)[0]
+        speculative_output = speculative.generate("first", params)[0]
+    finally:
+        baseline.shutdown()
+        speculative.shutdown()
+
+    assert calls
+    assert speculative_output.output_token_ids == (
+        baseline_output.output_token_ids
+    )
+    assert speculative_output.finish_reason is baseline_output.finish_reason

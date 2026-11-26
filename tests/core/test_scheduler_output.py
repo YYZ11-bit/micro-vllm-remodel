@@ -25,6 +25,84 @@ def make_scheduled_request() -> ScheduledRequest:
     )
 
 
+def make_speculative_request(
+    *,
+    num_draft_tokens: int,
+    num_scheduled_tokens: int | None = None,
+    requires_sampling: bool = True,
+) -> ScheduledRequest:
+    if num_scheduled_tokens is None:
+        num_scheduled_tokens = num_draft_tokens + 1
+    return ScheduledRequest(
+        request_id="request-1",
+        input_token_ids=tuple(range(num_scheduled_tokens)),
+        num_computed_tokens=4,
+        num_scheduled_tokens=num_scheduled_tokens,
+        requires_sampling=requires_sampling,
+        block_tables=(CacheGroupBlockTable((0,)),),
+        sampling_params=(
+            SamplingParams(max_tokens=4) if requires_sampling else None
+        ),
+        sample_index=0 if requires_sampling else None,
+        num_draft_tokens=num_draft_tokens,
+    )
+
+
+def test_num_sampling_rows_is_zero_without_sampling() -> None:
+    request = make_speculative_request(
+        num_draft_tokens=0,
+        num_scheduled_tokens=2,
+        requires_sampling=False,
+    )
+
+    assert request.num_sampling_rows == 0
+
+
+def test_num_sampling_rows_is_one_for_ordinary_sampling() -> None:
+    assert make_scheduled_request().num_sampling_rows == 1
+
+
+@pytest.mark.parametrize("num_draft_tokens", [1, 2, 4])
+def test_num_sampling_rows_counts_pending_token_and_all_drafts(
+    num_draft_tokens: int,
+) -> None:
+    request = make_speculative_request(
+        num_draft_tokens=num_draft_tokens,
+    )
+
+    assert request.num_sampling_rows == num_draft_tokens + 1
+
+
+def test_rejects_negative_draft_token_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match="num_draft_tokens must be non-negative",
+    ):
+        make_speculative_request(num_draft_tokens=-1)
+
+
+def test_rejects_draft_tokens_without_sampling() -> None:
+    with pytest.raises(
+        ValueError,
+        match="draft tokens require sampling in the same step",
+    ):
+        make_speculative_request(
+            num_draft_tokens=2,
+            requires_sampling=False,
+        )
+
+
+def test_rejects_speculative_step_that_omits_draft_tokens() -> None:
+    with pytest.raises(
+        ValueError,
+        match="one pending token plus all drafts",
+    ):
+        make_speculative_request(
+            num_draft_tokens=2,
+            num_scheduled_tokens=2,
+        )
+
+
 @pytest.mark.parametrize(
     ("field_name", "new_value"),
     [
@@ -36,6 +114,7 @@ def make_scheduled_request() -> ScheduledRequest:
         ("block_tables", (CacheGroupBlockTable((1,)),)),
         ("sampling_params", None),
         ("sample_index", 1),
+        ("num_draft_tokens", 1),
     ],
 )
 def test_scheduled_request_is_frozen(field_name: str, new_value: object) -> None:

@@ -27,11 +27,28 @@ class ScheduledRequest:
     block_tables: tuple[CacheGroupBlockTable, ...]
     sampling_params: SamplingParams | None = None
     sample_index: int | None = None
+    num_draft_tokens: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_token_ids", tuple(self.input_token_ids))
         object.__setattr__(self, "block_tables", tuple(self.block_tables))
+        if self.num_draft_tokens < 0:
+            raise ValueError("num_draft_tokens must be non-negative")
+        if self.num_draft_tokens > 0:
+            if not self.requires_sampling:
+                raise ValueError("draft tokens require sampling in the same step")
+            if self.num_scheduled_tokens != self.num_draft_tokens + 1:
+                raise ValueError(
+                    "speculative step must schedule one pending token plus all drafts"
+                )
+            
+    @property
+    def num_sampling_rows(self) -> int:
+        """Number of logits rows that produce predictions for this request."""
 
+        if not self.requires_sampling:
+            return 0
+        return self.num_draft_tokens + 1 if self.num_draft_tokens > 0 else 1
 
 @dataclass(frozen=True, slots=True)
 class SchedulerOutput:

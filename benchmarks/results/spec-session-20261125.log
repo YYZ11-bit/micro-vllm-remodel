@@ -1,0 +1,74 @@
+=== START 2026-11-25T21:43:54+08:00
++ /root/miniconda3/bin/python benchmarks/sweep_speculative.py --model /root/autodl-tmp/models/Qwen2.5-0.5B --output-dir benchmarks/results/sweep-qwen2.5-0.5b
+[sweep] ngram_size=2 max_draft_tokens=2
+  match=True speedup=1.706667531456977 acceptance=0.8666666666666667
+[sweep] ngram_size=2 max_draft_tokens=4
+  match=True speedup=2.904115147431557 acceptance=0.7711442786069652
+[sweep] ngram_size=2 max_draft_tokens=6
+  match=True speedup=3.8196964896521726 acceptance=0.7546296296296297
+[sweep] ngram_size=3 max_draft_tokens=2
+  match=True speedup=2.508120609036509 acceptance=0.9626865671641791
+[sweep] ngram_size=3 max_draft_tokens=4
+  match=True speedup=2.7184516808956194 acceptance=0.9523809523809523
+[sweep] ngram_size=3 max_draft_tokens=6
+  match=True speedup=5.1842896033341965 acceptance=0.9222222222222223
+[sweep] ngram_size=4 max_draft_tokens=2
+  match=True speedup=1.70221608074809 acceptance=0.984375
+[sweep] ngram_size=4 max_draft_tokens=4
+  match=True speedup=2.5306556938167843 acceptance=0.9625
+[sweep] ngram_size=4 max_draft_tokens=6
+  match=True speedup=3.3663290396013585 acceptance=0.9425287356321839
+[sweep] wrote benchmarks/results/sweep-qwen2.5-0.5b/summary.json
+=== EXIT 0 2026-11-25T21:51:25+08:00
+=== START 2026-11-25T21:51:25+08:00
++ /root/miniconda3/bin/python benchmarks/validate_speculative.py --model /root/autodl-tmp/models/Qwen2.5-1.5B --gpu-memory-utilization 0.65 --max-new-tokens 64 --repeat 3 --output benchmarks/results/speculative-validation-qwen2.5-1.5b-adaptive.json
+model=/root/autodl-tmp/models/Qwen2.5-1.5B
+dtype=float16 block_size=16 mode=single
+quantization=none group_size=128 kernel=reference
+ngram_size=3 max_draft_tokens=4
+gpu=NVIDIA GeForce RTX 4090 D
+repeated-prose: match=True first_mismatch=None
+repeated-code: match=True first_mismatch=None
+repeated-numbers: match=True first_mismatch=None
+general-explanation: match=True first_mismatch=None
+general-story: match=True first_mismatch=None
+baseline median=1.2201s speculative median=0.4859s speedup=2.511x
+proposals=504 verified=504 accepted=480 acceptance_rate=0.9523809523809523
+engine_steps baseline=960 speculative=504
+wrote benchmarks/results/speculative-validation-qwen2.5-1.5b-adaptive.json
+=== EXIT 0 2026-11-25T21:52:49+08:00
+=== START 2026-11-25T21:52:49+08:00
++ /root/miniconda3/bin/python benchmarks/validate_speculative.py --model /root/autodl-tmp/models/Qwen2.5-1.5B --gpu-memory-utilization 0.6 --max-new-tokens 64 --repeat 3 --quantization w4a16 --group-size 128 --kernel int4pack --output benchmarks/results/speculative-validation-qwen2.5-1.5b-w4a16.json
+model=/root/autodl-tmp/models/Qwen2.5-1.5B
+dtype=float16 block_size=16 mode=single
+quantization=w4a16 group_size=128 kernel=int4pack
+ngram_size=3 max_draft_tokens=4
+gpu=NVIDIA GeForce RTX 4090 D
+repeated-prose: match=True first_mismatch=None
+repeated-code: match=True first_mismatch=None
+repeated-numbers: match=True first_mismatch=None
+general-explanation: match=True first_mismatch=None
+general-story: match=True first_mismatch=None
+baseline median=1.5591s speculative median=0.3929s speedup=3.968x
+proposals=540 verified=540 accepted=513 acceptance_rate=0.95
+engine_steps baseline=960 speculative=477
+wrote benchmarks/results/speculative-validation-qwen2.5-1.5b-w4a16.json
+=== EXIT 0 2026-11-25T21:54:58+08:00
+=== START 2026-11-25T21:54:58+08:00
++ /root/miniconda3/bin/python benchmarks/validate_speculative.py --model /root/autodl-tmp/models/Qwen2.5-1.5B --gpu-memory-utilization 0.65 --max-new-tokens 64 --repeat 3 --batch --output benchmarks/results/speculative-validation-qwen2.5-1.5b-batch.json
+model=/root/autodl-tmp/models/Qwen2.5-1.5B
+dtype=float16 block_size=16 mode=batch
+quantization=none group_size=128 kernel=reference
+ngram_size=3 max_draft_tokens=4
+gpu=NVIDIA GeForce RTX 4090 D
+repeated-prose: match=True first_mismatch=None
+repeated-code: match=True first_mismatch=None
+repeated-numbers: match=True first_mismatch=None
+general-explanation: match=True first_mismatch=None
+general-story: match=True first_mismatch=None
+baseline median=2.8381s speculative median=1.8946s speedup=1.498x
+proposals=504 verified=504 accepted=480 acceptance_rate=0.9523809523809523
+engine_steps baseline=192 speculative=189
+wrote benchmarks/results/speculative-validation-qwen2.5-1.5b-batch.json
+=== EXIT 0 2026-11-25T21:56:11+08:00
+ALL DONE 2026-11-25T21:56:11+08:00

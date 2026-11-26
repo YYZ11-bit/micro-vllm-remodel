@@ -23,7 +23,11 @@ from micro_vllm.core.scheduler_output import (
     ScheduledRequest,
     SchedulerOutput,
 )
-from micro_vllm.executor.interface import ModelRunnerOutput
+from micro_vllm.executor.interface import (
+    ModelRunnerOutput,
+    SampledToken,
+    RequestVerification,
+)
 from micro_vllm.model_loader import load_model
 from micro_vllm.sampling.params import SamplingParams
 from micro_vllm.sampling.sampler import Sampler
@@ -215,26 +219,56 @@ class ModelRunner:
             )
             logits = model.compute_logits(sampling_hidden_states)
 
-        sampling_request_ids = tuple(
-            request.request_id
+        sampling_requests = tuple(
+            request
             for request in plan.scheduled_requests
             if request.requires_sampling
         )
-        sampling_params = tuple(
-            cast(SamplingParams, request.sampling_params)
-            for request in plan.scheduled_requests
-            if request.requires_sampling
-        )
-        sample_indices = tuple(
-            cast(int, request.sample_index)
-            for request in plan.scheduled_requests
-            if request.requires_sampling
-        )
-        return self._sampler(
+
+        row_sampling_params: list[SamplingParams] = []
+        row_sample_indices: list[int] = []
+        row_counts: list[int] = []
+
+        for request in sampling_requests:
+            num_rows = request.num_sampling_rows
+            params = cast(SamplingParams, request.sampling_params)
+            sample_index = cast(int, request.sample_index)
+
+            row_sampling_params.extend([params] * num_rows)
+            row_sample_indices.extend(
+                range(sample_index, sample_index + num_rows)
+            )
+            row_counts.append(num_rows)
+
+        token_ids = self._sampler.sample_token_ids(
             logits,
-            sampling_request_ids,
-            sampling_params,
-            sample_indices,
+            tuple(row_sampling_params),
+            tuple(row_sample_indices),
+        )
+
+        sampled_tokens: list[SampledToken] = []
+        verifications: list[RequestVerification] = []
+
+        offset = 0
+        for request, num_rows in zip(sampling_requests, row_counts):
+            request_token_ids = token_ids[offset : offset + num_rows]
+            offset += num_rows
+
+            if num_rows == 1:
+                sampled_tokens.append(
+                    SampledToken(request.request_id, request_token_ids[0])
+                )
+            else:
+                verifications.append(
+                    RequestVerification(
+                        request.request_id,
+                        request_token_ids,
+                    )
+                )
+
+        return ModelRunnerOutput(
+            sampled_tokens=tuple(sampled_tokens),
+            verifications=tuple(verifications),
         )
 
     # Resource release
@@ -602,7 +636,14 @@ class ModelRunner:
             context_lengths.append(request.num_computed_tokens + request.num_scheduled_tokens)
             request_ids.append(request.request_id)
             if request.requires_sampling:
-                sampling_row_indices.append(len(input_ids_list) - 1)
+                num_sampling_rows = request.num_sampling_rows
+                sampling_row_indices.extend(
+                    range(
+                        len(input_ids_list) - num_sampling_rows,
+                        len(input_ids_list),
+                    )
+                )
+
 
         total_tokens = len(input_ids_list)
         q_len = len(query_start_locations)

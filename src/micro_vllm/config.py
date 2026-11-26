@@ -19,6 +19,28 @@ if TYPE_CHECKING:
 _EMPTY_MODEL_METADATA: Mapping[str, object] = MappingProxyType({})
 
 @dataclass(frozen=True, slots=True)
+class SpeculativeConfig:
+    """Configuration for speculative decoding."""
+
+    enabled: bool = False
+    drafter_type: str = "ngram"  # "ngram"
+    ngram_size: int = 3
+    max_draft_tokens: int = 4
+    acceptance_method: str = "greedy"  # "greedy"
+
+    def __post_init__(self) -> None:
+        if self.drafter_type != "ngram":
+            raise ValueError(f"unsupported drafter_type {self.drafter_type!r}")
+        if self.acceptance_method != "greedy":
+            raise ValueError(
+                f"unsupported acceptance_method {self.acceptance_method!r}"
+            )
+        if self.ngram_size <= 0:
+            raise ValueError("ngram_size must be a positive integer")
+        if self.max_draft_tokens <= 0:
+            raise ValueError("max_draft_tokens must be a positive integer")
+
+@dataclass(frozen=True, slots=True)
 class QuantizationConfig:
     method: str = "none"
     group_size: int = 128
@@ -166,3 +188,4 @@ class LLMConfig:
     )
     cache_config: CacheConfig = field(default_factory=CacheConfig)
     trace_sink: TraceSink | None = None
+    speculative_config: SpeculativeConfig = field(default_factory=SpeculativeConfig)

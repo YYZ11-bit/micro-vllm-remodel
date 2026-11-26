@@ -291,3 +291,10 @@ class KVCacheManager:
         request_id: str,
     ) -> tuple[BlockTable, ...]:
         return self._block_tables[request_id]
+
+    def truncate_request(self, request_id: str, num_logical_blocks: int) -> None:
+        """Shrink every group table to a smaller number of logical blocks."""
+
+        for block_table in self._require_block_tables(request_id):
+            for block_id in block_table.truncate(num_logical_blocks):
+                self._block_pool.release(block_id)

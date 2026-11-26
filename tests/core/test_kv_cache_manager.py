@@ -508,3 +508,60 @@ def test_allocation_snapshot_is_frozen_and_stable() -> None:
     assert manager.get_block_table("request-1") == (0, 1)
     with pytest.raises(FrozenInstanceError):
         first.block_tables = ()
+
+
+def test_truncate_request_releases_only_tail_blocks() -> None:
+    manager = make_manager(block_size=4, num_blocks=9)
+    manager.register_request("request-1")
+    assert manager.allocate_slots("request-1", 0, 10) is not None
+    block_ids = manager.get_block_table("request-1")
+    assert len(block_ids) == 3
+
+    manager.truncate_request("request-1", 1)
+
+    assert manager.get_block_table("request-1") == (block_ids[0],)
+    assert manager._block_pool.ref_count(block_ids[1]) == 0
+    assert manager._block_pool.ref_count(block_ids[2]) == 0
+    assert manager.num_free_blocks == 7
+
+
+def test_truncate_request_keeps_shared_prefix_referenced() -> None:
+    manager = make_manager(block_size=4, num_blocks=9)
+    manager.register_request("request-1")
+    assert manager.allocate_slots("request-1", 0, 8) is not None
+    block_ids = manager.get_block_table("request-1")
+    shared_block = block_ids[0]
+    pool = manager._block_pool
+    assert pool.allocate(0, cached_block_ids=(shared_block,)) == ()
+    assert pool.ref_count(shared_block) == 2
+
+    manager.truncate_request("request-1", 1)
+    assert manager.get_block_table("request-1") == (shared_block,)
+    assert pool.ref_count(shared_block) == 2
+    assert pool.ref_count(block_ids[1]) == 0
+
+    manager.truncate_request("request-1", 0)
+    assert manager.get_block_table("request-1") == ()
+    assert pool.ref_count(shared_block) == 1
+    assert shared_block not in pool.free_block_ids
+
+
+def test_truncate_request_truncates_every_group() -> None:
+    manager = make_manager(
+        block_size=4,
+        num_blocks=12,
+        attention_specs=(FullAttentionSpec(), SlidingWindowSpec(4)),
+    )
+    manager.register_request("request-1")
+    assert manager.allocate_slots("request-1", 0, 8) is not None
+    first_group, second_group = manager.get_block_tables("request-1")
+    assert len(first_group) == 2
+    assert len(second_group) == 2
+
+    manager.truncate_request("request-1", 1)
+
+    assert manager.get_block_tables("request-1") == (
+        (first_group[0],),
+        (second_group[0],),
+    )
+    assert manager.num_free_blocks == 9

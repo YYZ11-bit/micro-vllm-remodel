@@ -194,3 +194,101 @@ def test_waiting_requests_can_be_aborted() -> None:
 
     assert waiting.finish_reason is FinishReason.ABORTED
     assert victim.finish_reason is FinishReason.ABORTED
+
+
+def test_draft_tokens_are_known_but_not_output() -> None:
+    request = make_request()
+    request.append_sampled_token(4)
+    request.advance_computed_tokens(4)
+    request.append_draft_tokens([5, 6])
+
+    assert request.num_output_tokens == 1
+    assert request.num_draft_tokens == 2
+    assert request.num_known_tokens == 6
+    assert request.num_pending_tokens == 2
+    assert request.all_token_ids == (1, 2, 3, 4, 5, 6)
+
+
+def test_accept_draft_prefix_moves_prefix_into_output() -> None:
+    request = make_request()
+    request.append_draft_tokens([4, 5, 6])
+
+    request.accept_draft_prefix(2)
+
+    assert request.output_token_ids == [4, 5]
+    assert request.draft_token_ids == [6]
+    assert request.num_output_tokens == 2
+    assert request.num_draft_tokens == 1
+    assert request.all_token_ids == (1, 2, 3, 4, 5, 6)
+
+
+def test_accept_draft_prefix_accepting_all_leaves_no_drafts() -> None:
+    request = make_request()
+    request.append_draft_tokens([4, 5])
+
+    request.accept_draft_prefix(2)
+
+    assert request.output_token_ids == [4, 5]
+    assert request.draft_token_ids == []
+
+
+@pytest.mark.parametrize("num_accepted", [-1, 2])
+def test_accept_draft_prefix_rejects_out_of_range_counts(
+    num_accepted: int,
+) -> None:
+    request = make_request()
+    request.append_draft_tokens([4])
+
+    with pytest.raises(
+        ValueError,
+        match="num_accepted must be non-negative",
+    ):
+        request.accept_draft_prefix(num_accepted)
+
+    assert request.output_token_ids == []
+    assert request.draft_token_ids == [4]
+
+
+def test_append_draft_tokens_validates_without_partial_mutation() -> None:
+    request = make_request()
+
+    with pytest.raises(ValueError, match=r"draft_token_ids\[1\]"):
+        request.append_draft_tokens([4, -1])
+
+    assert request.draft_token_ids == []
+
+
+def test_preempt_clears_uncommitted_drafts() -> None:
+    request = make_request()
+    request.resume()
+    request.advance_computed_tokens(3)
+    request.append_draft_tokens([4, 5])
+
+    request.preempt()
+
+    assert request.status is RequestStatus.WAITING
+    assert request.num_computed_tokens == 0
+    assert request.draft_token_ids == []
+    assert request.num_known_tokens == 3
+
+
+def test_clear_draft_tokens_restores_pending_token_count() -> None:
+    request = make_request()
+    request.append_draft_tokens([4, 5])
+
+    request.clear_draft_tokens()
+
+    assert request.num_known_tokens == 3
+    assert request.num_pending_tokens == 3
+    assert request.all_token_ids == (1, 2, 3)
+
+
+def test_finish_clears_uncommitted_drafts() -> None:
+    request = make_request()
+    request.resume()
+    request.append_draft_tokens([4, 5])
+
+    request.finish(FinishReason.LENGTH)
+
+    assert request.draft_token_ids == []
+    assert request.all_token_ids == (1, 2, 3)

@@ -1,13 +1,30 @@
 """Scheduling policies and request admission logic."""
 
 from collections import deque
+from dataclasses import dataclass
+from math import ceil
 
 from micro_vllm.config import LLMConfig
 from micro_vllm.core.kv_cache_manager import KVCacheHit, KVCacheManager
 from micro_vllm.core.request import FinishReason, Request, RequestStatus
 from micro_vllm.core.scheduler_output import ScheduledRequest, SchedulerOutput
-from micro_vllm.executor.interface import ModelRunnerOutput
+from micro_vllm.executor.interface import ModelRunnerOutput, RequestVerification
+from micro_vllm.speculative.acceptance import greedy_accept
+from micro_vllm.speculative.drafter import Drafter
 
+_SPECULATION_WINDOW = 8
+_SPECULATION_MIN_ACCEPTANCE = 0.30
+_SPECULATION_INITIAL_COOLDOWN = 8
+_SPECULATION_MAX_COOLDOWN = 64
+
+@dataclass
+class _SpeculationState:
+    accepted: int = 0
+    verified: int = 0
+    disabled: bool = False
+    cooldown: int = 0
+    probe: bool = False
+    backoff: int = _SPECULATION_INITIAL_COOLDOWN
 
 class Scheduler:
     """Own request state and build token-budgeted execution plans."""
@@ -16,12 +33,15 @@ class Scheduler:
         self,
         config: LLMConfig,
         kv_cache_manager: KVCacheManager,
+        drafter: Drafter | None = None,
     ) -> None:
         self._config = config
         self._kv_cache_manager = kv_cache_manager
+        self._drafter = drafter
         self._waiting: deque[Request] = deque()
         self._running: list[Request] = []
         self._requests: dict[str, Request] = {}
+        self._speculation_states: dict[str, _SpeculationState] = {}
         self._pending_plan: SchedulerOutput | None = None
 
     def add_request(self, request: Request) -> None:
@@ -57,6 +77,7 @@ class Scheduler:
         ):
             self._pending_plan = None
         self._kv_cache_manager.free_request(request_id)
+        self._speculation_states.pop(request_id, None)
         return True
 
     def get_request(self, request_id: str) -> Request | None:
@@ -87,6 +108,10 @@ class Scheduler:
                 or len(scheduled_requests) == scheduler_config.max_num_seqs
             ):
                 break
+            self._maybe_propose_draft_tokens(
+                request,
+                remaining_token_budget=remaining_token_budget,
+            )
             num_scheduled_tokens = min(
                 request.num_pending_tokens,
                 remaining_token_budget,
@@ -178,8 +203,33 @@ class Scheduler:
         }
 
         finished_request_ids: list[str] = []
+        verifications = {
+            verification.request_id: verification
+            for verification in result.verifications
+        }
+        
         for scheduled_request in plan.scheduled_requests:
             request = self._requests[scheduled_request.request_id]
+            verification = verifications.get(request.request_id)
+            if scheduled_request.num_draft_tokens > 0 and verification is None:
+                raise ValueError(
+                    f"request {scheduled_request.request_id} was scheduled for "
+                    f"{scheduled_request.num_scheduled_tokens} tokens but has no "
+                    "verification result"
+                )
+            if scheduled_request.num_draft_tokens == 0 and verification is not None:
+                raise ValueError(
+                    f"request {scheduled_request.request_id} was scheduled for "
+                    "0 tokens but has a verification result"
+                )
+            if verification is not None:
+                self._update_speculative_request(
+                    request,
+                    scheduled_request,
+                    verification,
+                    finished_request_ids,
+                )
+                continue
             request.advance_computed_tokens(
                 scheduled_request.num_scheduled_tokens
             )
@@ -219,6 +269,7 @@ class Scheduler:
                 if request.request_id not in finished_request_id_set
             ]
             for request_id in finished_request_ids:
+                self._speculation_states.pop(request_id, None)
                 self._kv_cache_manager.free_request(request_id)
         self._pending_plan = None
 
@@ -241,6 +292,14 @@ class Scheduler:
 
         end_computed = num_computed_tokens + num_scheduled_tokens
         requires_sampling = end_computed == request.num_known_tokens
+        num_draft_tokens = request.num_draft_tokens
+        if num_draft_tokens > 0 and (
+            not requires_sampling
+            or num_scheduled_tokens != num_draft_tokens + 1
+        ):
+            raise ValueError(
+                "speculative request must schedule one pending token plus all drafts"
+            )
         return ScheduledRequest(
             request_id=request.request_id,
             input_token_ids=request.all_token_ids[
@@ -256,4 +315,136 @@ class Scheduler:
             sample_index=(
                 request.num_output_tokens if requires_sampling else None
             ),
+            num_draft_tokens=request.num_draft_tokens if requires_sampling else 0,
         )
+
+    def _maybe_propose_draft_tokens(self, request: Request, remaining_token_budget: int) -> None:
+        if self._drafter is None:
+            return
+        if request.sampling_params.is_greedy is False:
+            return
+        if request.num_pending_tokens != 1:
+            return
+
+        state = self._speculation_states.setdefault(request.request_id, _SpeculationState())
+        if state.disabled:
+            if state.cooldown > 0:
+                state.cooldown -= 1
+                return
+            state.probe = True
+
+        max_model_len = self._config.scheduler_config.max_model_len
+        k_limit = min(
+            self._config.speculative_config.max_draft_tokens,
+            remaining_token_budget - 1,
+            max_model_len - request.num_computed_tokens - 1
+        )
+        if k_limit <= 0:
+            return
+        drafterOutput = self._drafter.propose(
+            request.all_token_ids,
+            k_limit
+        )
+        token_ids = drafterOutput.tokens_ids
+        if not token_ids:
+            if state.disabled:
+                state.probe = False
+                state.backoff = min(state.backoff * 2, _SPECULATION_MAX_COOLDOWN)
+                state.cooldown = state.backoff
+                state.accepted = 0
+                state.verified = 0
+            return
+        if len(token_ids) > 0:
+            request.append_draft_tokens(list(token_ids))
+
+    def _update_speculative_request(self, request: Request, 
+                                    scheduled_request: ScheduledRequest,
+                                    verification: RequestVerification,
+                                    finished_request_ids: list[str])-> None:
+        proposals = list(request.draft_token_ids)
+        acceptance_result = greedy_accept(proposals, list(verification.predicted_token_ids))
+        self._record_speculation_result(request.request_id, 
+                                        accepted = len(acceptance_result.accepted), 
+                                        verified = len(proposals),
+                                        )
+        request.clear_draft_tokens()
+        committed_accepted_count = 0
+        finish_reason: FinishReason | None = None
+        for token_id in acceptance_result.accepted:
+            request.append_sampled_token(token_id)
+            committed_accepted_count += 1
+            finish_reason = self._finish_reason_for_token(request, token_id)
+            if finish_reason is not None:
+                break
+
+        if finish_reason is None:
+            if acceptance_result.replacement:
+                token_id = acceptance_result.replacement[0]
+            else:
+                token_id = acceptance_result.extra[0]
+            request.append_sampled_token(token_id)
+            finish_reason = self._finish_reason_for_token(request, token_id)
+        request.advance_computed_tokens(1 + committed_accepted_count)
+        block_size = self._kv_cache_manager._layout.block_size
+        num_logical_blocks = ceil((request.num_computed_tokens + block_size - 1) // block_size)
+        self._kv_cache_manager.truncate_request(request.request_id, num_logical_blocks)
+        self._kv_cache_manager.commit_step(
+                        request.request_id,
+                        request.all_token_ids,
+                        request.num_computed_tokens,
+                    )
+        if finish_reason is not None:
+            request.finish(finish_reason)
+            finished_request_ids.append(request.request_id)
+
+    def _record_speculation_result(self, request_id: str, *, accepted: int, verified: int) -> None:
+        state = self._speculation_states.setdefault(request_id, _SpeculationState())
+        state.accepted += accepted
+        state.verified += verified
+        if state.probe:
+            state.probe = False
+            if(
+                state.verified == 0
+                or state.accepted / state.verified < _SPECULATION_MIN_ACCEPTANCE
+            ):
+                state.disabled = True
+                state.backoff = min(state.backoff * 2, _SPECULATION_MAX_COOLDOWN)
+                state.cooldown = state.backoff
+            else:
+                state.disabled = False
+                state.cooldown = 0
+                state.backoff = max(state.backoff // 2, _SPECULATION_INITIAL_COOLDOWN)
+            state.accepted = 0
+            state.verified = 0
+            return
+
+        if state.verified < _SPECULATION_WINDOW:
+            return  
+
+        if(
+            state.accepted / state.verified < _SPECULATION_MIN_ACCEPTANCE
+        ):
+            state.disabled = True
+            state.probe = False
+            state.backoff = _SPECULATION_INITIAL_COOLDOWN
+            state.cooldown = state.backoff
+        state.accepted = 0
+        state.verified = 0
+
+    def _finish_reason_for_token(
+        self,
+        request: Request,
+        token_id: int,
+    ) -> FinishReason | None:
+        params = request.sampling_params
+        if (
+            params.eos_token_id is not None
+            and token_id == params.eos_token_id
+            and not params.ignore_eos
+        ):
+            return FinishReason.EOS
+        if request.num_output_tokens >= params.max_tokens:
+            return FinishReason.LENGTH
+        if request.num_known_tokens == self._config.scheduler_config.max_model_len:
+            return FinishReason.MODEL_LENGTH
+        return None

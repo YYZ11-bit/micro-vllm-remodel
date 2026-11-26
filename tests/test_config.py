@@ -8,6 +8,7 @@ from micro_vllm.config import (
     LLMConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
 )
 
 
@@ -154,3 +155,51 @@ def test_model_config_rejects_unsupported_device_type() -> None:
 def test_model_config_rejects_non_floating_dtype() -> None:
     with pytest.raises(ValueError, match="dtype must be"):
         ModelConfig(model="unused", dtype=torch.int64)
+
+
+def test_speculative_config_defaults_to_disabled_ngram_greedy() -> None:
+    config = SpeculativeConfig()
+
+    assert config.enabled is False
+    assert config.drafter_type == "ngram"
+    assert config.ngram_size == 3
+    assert config.max_draft_tokens == 4
+    assert config.acceptance_method == "greedy"
+
+
+def test_speculative_config_accepts_explicit_values() -> None:
+    config = SpeculativeConfig(
+        enabled=True,
+        ngram_size=2,
+        max_draft_tokens=8,
+    )
+
+    assert config.enabled is True
+    assert config.ngram_size == 2
+    assert config.max_draft_tokens == 8
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"drafter_type": "random"}, "drafter_type"),
+        ({"acceptance_method": "topk"}, "acceptance_method"),
+        ({"ngram_size": 0}, "ngram_size"),
+        ({"ngram_size": -1}, "ngram_size"),
+        ({"max_draft_tokens": 0}, "max_draft_tokens"),
+        ({"max_draft_tokens": -1}, "max_draft_tokens"),
+    ],
+)
+def test_speculative_config_rejects_unsupported_values(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        SpeculativeConfig(**kwargs)
+
+
+def test_llm_config_defaults_to_disabled_speculation() -> None:
+    config = LLMConfig(model_config=ModelConfig(model="org/model"))
+
+    assert config.speculative_config == SpeculativeConfig()
+    assert config.speculative_config.enabled is False

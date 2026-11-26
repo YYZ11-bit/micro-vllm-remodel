@@ -52,6 +52,23 @@ def test_empty_sampling_batch_returns_empty_output() -> None:
     assert output == ModelRunnerOutput()
 
 
+def test_sample_token_ids_returns_row_tokens_in_order() -> None:
+    logits = torch.tensor(
+        [
+            [0.0, 4.0, 1.0],
+            [5.0, 2.0, 0.0],
+        ]
+    )
+    params = (
+        SamplingParams(max_tokens=1),
+        SamplingParams(max_tokens=1),
+    )
+
+    token_ids = Sampler().sample_token_ids(logits, params, (0, 0))
+
+    assert token_ids == (1, 0)
+
+
 def test_equal_maximum_logits_follow_torch_argmax_tie_behavior() -> None:
     logits = torch.tensor([[1.0, 3.0, 3.0, 2.0]])
 

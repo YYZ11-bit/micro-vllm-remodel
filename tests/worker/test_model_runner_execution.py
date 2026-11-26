@@ -15,6 +15,10 @@ from micro_vllm.core.scheduler_output import (
     ScheduledRequest,
     SchedulerOutput,
 )
+from micro_vllm.executor.interface import (
+    RequestVerification,
+    SampledToken,
+)
 from micro_vllm.sampling.params import SamplingParams
 from micro_vllm.worker.model_runner import ModelRunner
 
@@ -369,6 +373,7 @@ def make_request(
     num_computed_tokens: int,
     requires_sampling: bool,
     block_ids: tuple[int, ...],
+    num_draft_tokens: int = 0,
 ) -> ScheduledRequest:
     return ScheduledRequest(
         request_id=request_id,
@@ -381,6 +386,7 @@ def make_request(
             SamplingParams(max_tokens=4) if requires_sampling else None
         ),
         sample_index=0 if requires_sampling else None,
+        num_draft_tokens=num_draft_tokens,
     )
 
 
@@ -427,6 +433,7 @@ def test_mixed_batch_selects_sampling_rows_and_preserves_plan() -> None:
         (sample.request_id, sample.token_id)
         for sample in first_output.sampled_tokens
     ] == [("first-sampled", 7), ("last-sampled", 32)]
+    assert first_output.verifications == ()
     assert model.logit_inputs[-1].tolist() == [[7.0, 2.0], [32.0, 4.0]]
     assert len(model.layer_kv_caches) == len(cache) == 2
     assert all(
@@ -472,6 +479,7 @@ def test_batch_without_sampling_still_executes_model() -> None:
     output = runner.execute(plan)
 
     assert output.sampled_tokens == ()
+    assert output.verifications == ()
     assert len(model.forward_inputs) == 1
     assert model.logit_inputs[0].shape == torch.Size((0, 2))
 
@@ -504,3 +512,62 @@ def test_batch_with_all_requests_sampling_preserves_request_order() -> None:
         "first-id",
     ]
     assert [sample.token_id for sample in output.sampled_tokens] == [12, 23]
+    assert output.verifications == ()
+
+
+@pytest.mark.parametrize("num_drafts", [1, 2, 3])
+def test_speculative_request_returns_one_verification_per_row(
+    num_drafts: int,
+) -> None:
+    runner, model, _ = make_runner()
+    input_token_ids = tuple(range(40, 41 + num_drafts))
+    plan = SchedulerOutput(
+        (
+            make_request(
+                "spec",
+                input_token_ids,
+                num_computed_tokens=0,
+                requires_sampling=True,
+                block_ids=(0, 1, 2),
+                num_draft_tokens=num_drafts,
+            ),
+        )
+    )
+
+    output = runner.execute(plan)
+
+    assert output.sampled_tokens == ()
+    assert output.verifications == (
+        RequestVerification("spec", input_token_ids),
+    )
+    assert model.logit_inputs[-1].shape[0] == num_drafts + 1
+
+
+def test_mixed_batch_keeps_samples_and_verifications_separate() -> None:
+    runner, _, _ = make_runner()
+    plan = SchedulerOutput(
+        (
+            make_request(
+                "decode",
+                (7,),
+                num_computed_tokens=2,
+                requires_sampling=True,
+                block_ids=(6, 1),
+            ),
+            make_request(
+                "spec",
+                (40, 41, 42),
+                num_computed_tokens=2,
+                requires_sampling=True,
+                block_ids=(3, 5, 2),
+                num_draft_tokens=2,
+            ),
+        )
+    )
+
+    output = runner.execute(plan)
+
+    assert output.sampled_tokens == (SampledToken("decode", 7),)
+    assert output.verifications == (
+        RequestVerification("spec", (40, 41, 42)),
+    )

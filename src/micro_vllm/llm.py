@@ -15,6 +15,7 @@ from micro_vllm.executor.single_process import SingleProcessExecutor
 from micro_vllm.sampling.params import SamplingParams
 from micro_vllm.tokenizer import apply_tokenizer_eos, load_tokenizer
 from micro_vllm.worker.worker import Worker
+from micro_vllm.speculative.ngram import NGramDrafter
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +54,15 @@ class LLM:
             tokenizer = load_tokenizer(config)
 
         worker = Worker(config)
+        drafter = (
+            NGramDrafter(config.speculative_config.ngram_size)
+            if config.speculative_config.enabled
+            else None
+        )
         scheduler = Scheduler(
             config,
             KVCacheManager(config, worker.kv_cache_layout),
+            drafter=drafter,
         )
         executor = SingleProcessExecutor(worker)
 

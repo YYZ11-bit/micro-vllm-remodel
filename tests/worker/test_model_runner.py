@@ -190,6 +190,7 @@ def make_scheduled_request(
     *,
     num_computed_tokens: int,
     requires_sampling: bool,
+    num_draft_tokens: int = 0,
 ) -> ScheduledRequest:
     return ScheduledRequest(
         request_id=request_id,
@@ -202,6 +203,7 @@ def make_scheduled_request(
             SamplingParams(max_tokens=1) if requires_sampling else None
         ),
         sample_index=0 if requires_sampling else None,
+        num_draft_tokens=num_draft_tokens,
     )
 
 
@@ -320,6 +322,53 @@ def test_sampling_rows_follow_request_order() -> None:
 
     assert model_input.request_ids == ("first", "second")
     assert model_input.sampling_row_indices.tolist() == [0, 2]
+
+
+def test_speculative_request_selects_pending_and_every_draft_row() -> None:
+    model_input = flatten_requests(
+        make_scheduled_request(
+            "spec",
+            (40, 41, 42, 43),
+            num_computed_tokens=8,
+            requires_sampling=True,
+            num_draft_tokens=3,
+        )
+    )
+
+    assert model_input.sampling_row_indices.tolist() == [0, 1, 2, 3]
+
+
+def test_mixed_batch_offsets_speculative_rows_after_ordinary_requests() -> None:
+    model_input = flatten_requests(
+        make_scheduled_request(
+            "spec",
+            (10, 11, 12),
+            num_computed_tokens=4,
+            requires_sampling=True,
+            num_draft_tokens=2,
+        ),
+        make_scheduled_request(
+            "prefill",
+            (20, 21),
+            num_computed_tokens=0,
+            requires_sampling=False,
+        ),
+        make_scheduled_request(
+            "decode",
+            (30,),
+            num_computed_tokens=6,
+            requires_sampling=True,
+        ),
+        make_scheduled_request(
+            "spec-tail",
+            (40, 41),
+            num_computed_tokens=2,
+            requires_sampling=True,
+            num_draft_tokens=1,
+        ),
+    )
+
+    assert model_input.sampling_row_indices.tolist() == [0, 1, 2, 5, 6, 7]
 
 
 def test_builds_per_group_metadata_over_shared_batch_tensors() -> None:

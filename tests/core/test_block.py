@@ -2,6 +2,8 @@
 
 import random
 
+import pytest
+
 from micro_vllm.core.block import BlockPool, BlockTable, KVCacheBlock
 
 NULL_BLOCK_ID = 99
@@ -336,3 +338,53 @@ def test_block_table_operations_do_not_change_block_pool_refcounts() -> None:
 
     assert tuple(pool.ref_count(block_id) for block_id in range(4)) == (1, 1, 1, 0)
     assert pool.num_free_blocks == 0
+
+
+def test_truncate_releases_tail_mappings_and_keeps_prefix() -> None:
+    table = BlockTable(NULL_BLOCK_ID)
+    table.extend([7, 11, 13])
+
+    assert table.truncate(1) == (11, 13)
+
+    assert table.snapshot() == (7,)
+    assert table.num_logical_blocks == 1
+
+
+def test_truncate_skips_null_block_entries() -> None:
+    table = BlockTable(NULL_BLOCK_ID)
+    table.extend([7, NULL_BLOCK_ID, 13])
+
+    assert table.truncate(1) == (13,)
+    assert table.snapshot() == (7,)
+
+
+def test_truncate_to_zero_clears_all_mappings() -> None:
+    table = BlockTable(NULL_BLOCK_ID)
+    table.extend([7, NULL_BLOCK_ID, 13])
+
+    assert table.truncate(0) == (7, 13)
+    assert table.snapshot() == ()
+
+
+@pytest.mark.parametrize("num_logical_blocks", [3, 4])
+def test_truncate_is_noop_when_not_shrinking(
+    num_logical_blocks: int,
+) -> None:
+    table = BlockTable(NULL_BLOCK_ID)
+    table.extend([7, 11, 13])
+
+    assert table.truncate(num_logical_blocks) == ()
+    assert table.snapshot() == (7, 11, 13)
+
+
+def test_truncate_rejects_negative_block_count() -> None:
+    table = BlockTable(NULL_BLOCK_ID)
+    table.extend([7])
+
+    with pytest.raises(
+        ValueError,
+        match="num_logical_blocks must be non-negative",
+    ):
+        table.truncate(-1)
+
+    assert table.snapshot() == (7,)

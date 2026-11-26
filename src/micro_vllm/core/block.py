@@ -250,3 +250,19 @@ class BlockTable:
         """Return an immutable snapshot of logical-to-physical mappings."""
 
         return tuple(self._physical_block_ids)
+
+    def truncate(self, num_logical_blocks: int) -> tuple[int, ...]:
+        """Shrink the table to a smaller number of logical blocks."""
+
+        if num_logical_blocks < 0:
+            raise ValueError("num_logical_blocks must be non-negative")
+        if num_logical_blocks >= self.num_logical_blocks:
+            return ()
+        released_block_ids = tuple(
+            block_id
+            for block_id in self._physical_block_ids[num_logical_blocks :]
+            if block_id != self._null_block_id
+        )
+        del self._physical_block_ids[num_logical_blocks :]
+        return released_block_ids
+    

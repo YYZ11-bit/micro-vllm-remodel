@@ -19,9 +19,11 @@ class ModelRunnerOutput:
     """Minimal result returned after executing one scheduler plan."""
 
     sampled_tokens: tuple[SampledToken, ...] = ()
+    verifications: tuple["RequestVerification", ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampled_tokens", tuple(self.sampled_tokens))
+        object.__setattr__(self, "verifications", tuple(self.verifications))
 
 
 class Executor(Protocol):
@@ -36,3 +38,13 @@ class Executor(Protocol):
         """Release resources owned by the executor."""
 
         ...
+
+@dataclass(frozen=True, slots=True)
+class RequestVerification:
+    request_id: str
+    predicted_token_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "predicted_token_ids", tuple(self.predicted_token_ids)
+        )

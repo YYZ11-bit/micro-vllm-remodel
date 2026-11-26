@@ -51,6 +51,7 @@ class Request:
     num_computed_tokens: int = field(default=0, init=False)
     status: RequestStatus = field(default=RequestStatus.WAITING, init=False)
     finish_reason: FinishReason | None = field(default=None, init=False)
+    draft_token_ids: list[int] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -73,6 +74,12 @@ class Request:
             )
 
     @property
+    def num_draft_tokens(self) -> int:
+        """Number of speculative draft tokens currently known to the request."""
+
+        return len(self.draft_token_ids)
+    
+    @property
     def num_prompt_tokens(self) -> int:
         """Number of tokens in the prompt."""
 
@@ -86,9 +93,9 @@ class Request:
 
     @property
     def num_known_tokens(self) -> int:
-        """Total number of prompt and sampled tokens known to the request."""
+        """Total number of prompt, sampled, and draft tokens known to the request."""
 
-        return self.num_prompt_tokens + self.num_output_tokens
+        return self.num_prompt_tokens + self.num_output_tokens + self.num_draft_tokens
 
     @property
     def num_pending_tokens(self) -> int:
@@ -100,7 +107,7 @@ class Request:
     def all_token_ids(self) -> tuple[int, ...]:
         """Return an immutable snapshot of all currently known token IDs."""
 
-        return tuple(self.prompt_token_ids) + tuple(self.output_token_ids)
+        return tuple(self.prompt_token_ids) + tuple(self.output_token_ids) + tuple(self.draft_token_ids)
 
     @property
     def is_finished(self) -> bool:
@@ -133,6 +140,7 @@ class Request:
 
         self.transition_to(RequestStatus.WAITING)
         self.num_computed_tokens = 0
+        self.clear_draft_tokens()
 
     def resume(self, num_computed_tokens: int = 0) -> None:
         """Enter RUNNING state at a recomputed or cached prefix boundary."""
@@ -145,3 +153,27 @@ class Request:
 
         self.status = RequestStatus.FINISHED
         self.finish_reason = reason
+        self.clear_draft_tokens()
+
+    def append_draft_tokens(self, token_ids: list[int]) -> None:
+        """Append speculative draft tokens to the request."""
+
+        _validate_token_ids("draft_token_ids", token_ids)
+        self.draft_token_ids.extend(token_ids)
+
+    def accept_draft_prefix(self, num_accepted: int) -> None:
+        """Accept a prefix of the draft tokens as output tokens."""
+
+        if num_accepted < 0 or num_accepted > self.num_draft_tokens:
+            raise ValueError(
+                f"num_accepted must be non-negative and at most "
+                f"{self.num_draft_tokens}, got {num_accepted}"
+            )
+        accepted_tokens = self.draft_token_ids[:num_accepted]
+        self.output_token_ids.extend(accepted_tokens)
+        self.draft_token_ids = self.draft_token_ids[num_accepted:]
+
+    def clear_draft_tokens(self) -> None:
+        """Clear all speculative draft tokens from the request."""
+
+        self.draft_token_ids.clear()

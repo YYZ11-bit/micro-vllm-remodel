@@ -21,18 +21,27 @@ class Sampler:
         sample_indices: tuple[int, ...],
         /,
     ) -> ModelRunnerOutput:
-        token_ids = tuple(
-            self._sample_row(row, params, sample_index)
-            for row, params, sample_index in zip(
-                logits,
-                sampling_params,
-                sample_indices,
-            )
+        token_ids = self.sample_token_ids(
+            logits, sampling_params, sample_indices
         )
         return ModelRunnerOutput(
             tuple(
                 SampledToken(request_id, token_id)
                 for request_id, token_id in zip(request_ids, token_ids)
+            )
+        )
+
+    def sample_token_ids(
+        self,
+        logits: torch.Tensor,
+        sampling_params: tuple[SamplingParams, ...],
+        sample_indices: tuple[int, ...],
+        /,
+    ) -> tuple[int, ...]:
+        return tuple(
+            self._sample_row(row, params, sample_index)
+            for row, params, sample_index in zip(
+                logits, sampling_params, sample_indices
             )
         )
 
